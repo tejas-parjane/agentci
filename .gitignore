@@ -29,6 +29,7 @@ ENV/
 
 # Testing / typing / coverage
 .pytest_cache/
+.pytest_tmp/
 .ruff_cache/
 .mypy_cache/
 .coverage

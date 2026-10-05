@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agentci.__about__ import TRACE_SCHEMA_VERSION
 from agentci.core.config import StorageConfig
 from agentci.core.redaction import Redactor
 from agentci.core.result import AgentResult
@@ -126,23 +127,51 @@ class RunStore:
         return StoredRun(run_id=run_id, directory=directory, trace_path=trace_path)
 
     def load_trace(self, run_id: str) -> list[TraceEvent]:
-        """Read a trace back, tolerating a truncated final line."""
+        """Read a trace back.
+
+        A truncated *final* line is tolerated: it means the run was interrupted,
+        and everything up to that point is still valid evidence. Anything else --
+        malformed JSON in the middle of the file, an event that will not validate,
+        or a different schema version -- is a real problem with the artifact and is
+        raised rather than silently returning a short trace that looks complete.
+        """
         path = self.run_dir(run_id) / TRACE_FILENAME
         if not path.is_file():
             return []
+        lines = path.read_text(encoding="utf-8").splitlines()
         events: list[TraceEvent] = []
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    data = json.loads(stripped)
-                    events.append(TraceEvent.model_validate(data))
-                except (json.JSONDecodeError, ValueError):
-                    # A partial last line means the run was interrupted; keep
-                    # everything up to that point rather than failing the replay.
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            is_last = index == len(lines) - 1
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                if is_last:
                     break
+                raise StorageError(
+                    f"{path}: line {index + 1} is not valid JSON",
+                    hint="the trace appears to be corrupt rather than truncated",
+                ) from exc
+
+            version = data.get("schema_version") if isinstance(data, dict) else None
+            if version is not None and version != TRACE_SCHEMA_VERSION:
+                raise StorageError(
+                    f"{path}: trace schema version {version} cannot be read by this "
+                    f"version of AgentCI (expects {TRACE_SCHEMA_VERSION})",
+                    hint="re-run the tests, or upgrade AgentCI to read this trace",
+                )
+
+            try:
+                events.append(TraceEvent.model_validate(data))
+            except ValueError as exc:
+                if is_last:
+                    break
+                raise StorageError(
+                    f"{path}: line {index + 1} is not a valid trace event",
+                    hint="the trace appears to be corrupt rather than truncated",
+                ) from exc
         return events
 
     def save_result(self, run_id: str, result: AgentResult) -> StoredRun | None:

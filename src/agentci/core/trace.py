@@ -147,6 +147,24 @@ class TraceEvent(BaseModel):
     def schema_version(self) -> int:
         return TRACE_SCHEMA_VERSION
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_persisted_schema_version(cls, data: Any) -> Any:
+        """Let a previously serialized event validate against this model.
+
+        ``schema_version`` is a computed field, so it appears in serialized output
+        but is not a stored field. With ``extra="forbid"`` that combination makes
+        the output of :meth:`to_dict` unacceptable to this very class, which broke
+        replay outright: every trace AgentCI wrote failed to read back. Dropping
+        the key on the way in restores a genuine round trip while still rejecting
+        keys nobody has heard of. The value itself is checked by
+        :func:`agentci.core.storage.load_trace`, which is where a real version
+        mismatch belongs.
+        """
+        if isinstance(data, dict) and "schema_version" in data:
+            data = {key: value for key, value in data.items() if key != "schema_version"}
+        return data
+
     @property
     def is_tool_call(self) -> bool:
         return self.tool is not None

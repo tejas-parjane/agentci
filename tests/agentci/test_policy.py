@@ -63,8 +63,10 @@ def test_unmocked_side_effect_is_refused(agent):
         agent.ctx.tools.call("delete_ticket", ticket_id="T-1001")
     except SideEffectBlocked as exc:
         assert "delete_ticket" in str(exc)
-        # The error must tell the user how to proceed, not just that it failed.
-        assert "mock" in str(exc).lower()
+        # The actionable half of the diagnosis lives in `hint`, not `str(exc)`:
+        # the message says what happened, the hint says what to do about it, and
+        # `__str__` deliberately returns only the former.
+        assert "mock" in (exc.hint or "").lower()
     else:  # pragma: no cover
         raise AssertionError("a destructive tool was allowed to run")
 

@@ -358,13 +358,16 @@ class TestRunner:
             outcome = case(agent=handle, ctx=ctx, config=self.config)
             if inspect.isawaitable(outcome):
                 asyncio.run(_await(outcome))
-        except (KeyboardInterrupt, SystemExit):
-            deactivate(token)
-            raise
         except BaseException as exc:
+            # Includes KeyboardInterrupt/SystemExit: re-raising happens below only
+            # after `finally` has deactivated. Deactivating in both places would
+            # reset the same ContextVar token twice, which raises RuntimeError.
             body_error = exc
         finally:
             deactivate(token)
+
+        if isinstance(body_error, (KeyboardInterrupt, SystemExit)):
+            raise body_error
 
         if body_error is not None:
             self._record_failure(recorder, body_error)
@@ -504,18 +507,22 @@ class TestRunner:
         blocking = [v for v in violations if v.severity is Status.FAIL]
         if blocking:
             return Status.FAIL, blocking[0].message, blocking[0].kind
+        # Error handling comes *before* the WARN short-circuit. A non-blocking
+        # violation is expected whenever a test probes policy on purpose, so it
+        # must never outrank a real body exception and report the test as passing.
+        if error is not None:
+            # A bare ``assert`` in a test body is a quality finding, not a broken
+            # harness, so it must land in the same bucket as a failed assertion
+            # rather than being reported as an infrastructure ERROR.
+            rendered = _render_error(error)
+            if isinstance(
+                error, (AssertionError, AssertionFailed, StepLimitExceeded, DeadlineExceeded)
+            ):
+                return Status.FAIL, rendered, classify_error(error)
+            return Status.ERROR, rendered, classify_error(error)
         if any(v.severity is Status.WARN for v in violations):
             return Status.PASS, None, None
-        if error is None:
-            return Status.PASS, None, None
-        # A bare ``assert`` in a test body is a quality finding, not a broken
-        # harness, so it must land in the same bucket as a failed assertion rather
-        # than being reported as an infrastructure ERROR.
-        if isinstance(
-            error, (AssertionError, AssertionFailed, StepLimitExceeded, DeadlineExceeded)
-        ):
-            return Status.FAIL, str(error), classify_error(error)
-        return Status.ERROR, f"{type(error).__name__}: {error}", classify_error(error)
+        return Status.PASS, None, None
 
     def _test_status(
         self,
@@ -840,6 +847,27 @@ class TestRunner:
             git_branch=git.branch,
             git_dirty=git.dirty,
         )
+
+
+def _render_error(error: BaseException) -> str:
+    """Render a test-body failure for the report, including its hint.
+
+    ``AgentCIError`` carries a ``hint`` holding the actionable half of the
+    diagnosis, and ``__str__`` returns only the message on purpose so structured
+    ``detail`` never leaks into logs. That means the hint has to be appended
+    explicitly, or the report would tell a user *that* something failed without
+    telling them *what to do*, which is the whole point of carrying one.
+
+    The ``\\n  hint: `` shape matches :mod:`agentci.assertions.base`, so assertion
+    and error text read identically in the JSON and Markdown reports.
+    """
+    if isinstance(error, AgentCIError):
+        text = error.message
+        if error.hint:
+            return f"{text}\n  hint: {error.hint}"
+        return text
+    text = str(error)
+    return text or type(error).__name__
 
 
 def _restamp(event: TraceEvent, run_id: str) -> TraceEvent:

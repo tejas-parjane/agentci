@@ -165,6 +165,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# `tests/agentci/` holds AgentCI's own example suite: files decorated with
+# @agent_test whose functions take an injected `agent`, not pytest fixtures.
+# They are executed by `agentci run` / scripts/verify.py, so collecting them here
+# would fail every one of them with a missing-fixture error.
+norecursedirs = ["agentci", ".agentci", ".venv", "build", "dist"]
 addopts = [
     "-q",
     "--strict-markers",

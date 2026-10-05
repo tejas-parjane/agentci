@@ -40,6 +40,25 @@ from agentci.errors import DeadlineExceeded, StepLimitExceeded
 _parent_stack: ContextVar[tuple[str, ...]] = ContextVar("agentci_parent_stack", default=())
 
 
+class _Unset:
+    """Sentinel distinguishing "infer the parent" from an explicit ``None``.
+
+    ``parent_id=None`` cannot mean both "this event is top-level" and "attach me to
+    whatever is currently open", because the common case is the former and the
+    convenience is the latter. Without a separate sentinel, a context manager
+    finishing its own block could never detach the completion event, and it would
+    silently nest under the start event it was emitted to close.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<unset>"
+
+
+_UNSET: Any = _Unset()
+
+
 class EventContext:
     """Base handle returned by the recorder's context managers.
 
@@ -198,28 +217,30 @@ class TraceRecorder:
         self,
         event_type: EventType,
         *,
-        parent_id: str | None = None,
+        parent_id: str | _Unset | None = _UNSET,
         run_id: str | None = None,
         **fields: Any,
     ) -> TraceEvent:
         """Append an event and return it.
 
-        ``parent_id`` defaults to the innermost open context, which is what makes
-        ``with rec.tool_call(...)`` nest correctly without the caller threading
-        identifiers through.
+        Leaving ``parent_id`` unset attaches the event to the innermost open
+        context, which is what makes ``with rec.tool_call(...)`` nest correctly
+        without the caller threading identifiers through. Passing ``None``
+        explicitly detaches the event, however deep the stack currently is.
         """
         self._check_deadline()
-        parent = parent_id
-        if parent is None:
+        if isinstance(parent_id, _Unset):
             stack = _parent_stack.get()
-            parent = stack[-1] if stack else None
+            resolved = stack[-1] if stack else None
+        else:
+            resolved = parent_id
 
         event = TraceEvent(
             run_id=run_id or self.run_id,
             event_id=new_id("evt"),
             type=event_type,
             timestamp=utc_now(),
-            parent_id=parent,
+            parent_id=resolved,
             **fields,
         )
         self.trace.events.append(event)

@@ -34,6 +34,11 @@ def example_suite() -> int:
 
 
 def probe(adapter_ref, body, label, budgets=None) -> bool:
+    """Run one body expected to fail and report whether it did.
+
+    ``body`` is called the way the runner calls a real test -- by keyword, with
+    ``agent``/``ctx``/``config`` -- so probe bodies must accept keyword arguments.
+    """
     cfg = load_config(ROOT / "agentci.yaml")
     if budgets:
         cfg = cfg.model_copy(update={"budgets": cfg.budgets.model_copy(update=budgets)})
@@ -79,12 +84,12 @@ def negative_paths() -> int:
         ),
         probe(
             "examples.support_agent.agent:run_agent",
-            lambda agent: (_ for _ in ()).throw(AssertionError("boom")),
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("boom")),
             "bare assert in test body",
         ),
         probe(
             "examples.support_agent.agent:run_agent",
-            lambda agent: (_ for _ in ()).throw(RuntimeError("infra")),
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("infra")),
             "infrastructure fault",
         ),
         probe(

@@ -13,9 +13,8 @@ script, a notebook, or a future pytest plugin.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from collections.abc import Callable
-from contextvars import ContextVar, Token
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar
 from typing import Any, Self
 
 from agentci.assertions import execution as _execution

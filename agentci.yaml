@@ -1,0 +1,112 @@
+# AgentCI configuration for the bundled example agent.
+# Reference: docs/reference/configuration.md
+version: 1
+
+project:
+  name: support-agent
+
+agent:
+  adapter: examples.support_agent.agent:SupportAgent
+  model: gpt-5-mini
+
+evaluation:
+  repeat: 1
+  minimum_pass_rate: 1.0
+  allow_flaky: true
+
+# Hard limits, applied by the runner to every invocation whether or not the test
+# body asserted them.
+budgets:
+  max_cost_usd: 0.05
+  max_latency_ms: 5000
+  max_tool_calls: 10
+  max_steps: 20
+  max_tokens: 50000
+
+policies:
+  # An allowlist is a whitelist of *declared* tools, checked before the
+  # side-effect gate. `delete_ticket` is listed here precisely so the gate below
+  # is what refuses it -- if it were omitted, the allowlist would deny it and the
+  # side-effect gate would never be exercised.
+  allowed_tools:
+    - lookup_ticket
+    - escalate_ticket
+    - delete_ticket
+  denied_tools: []
+  approval_required: []
+  forbidden_data_patterns:
+    - password
+    - credit_card
+
+redaction:
+  enabled: true
+  patterns:
+    - email
+    - phone
+    - ssn
+    - credit_card
+    - aws_access_key
+    - api_key
+    - jwt
+  fields:
+    - authorization
+    - api_key
+    - password
+    - cookie
+  scrub_environment: true
+
+# Escalating a ticket changes state outside the process, so it is denied unless a
+# test explicitly grants an approval.
+execution:
+  external_side_effects: deny
+  side_effecting_tools:
+    - escalate_ticket
+    - delete_ticket
+  mocks:
+    lookup_ticket:
+      response:
+        id: T-1001
+        subject: Refund never arrived
+        status: open
+        priority: high
+        assignee: dana
+    escalate_ticket:
+      response:
+        escalated: true
+        queue: human
+
+gates:
+  policy_compliance: "== 1.0"
+  task_success: ">= 0.90"
+  reliability: ">= 0.95"
+
+regression:
+  baseline: .agentci/baseline.json
+  max_quality_drop: 0.05
+  max_cost_increase_pct: 25
+  max_latency_increase_pct: 30
+  on_regression: fail
+  fail_on_new_test_failures: true
+
+selection:
+  enabled: true
+  # Safe default: a test with no declared dependency cannot be proven unaffected
+  # by a change, so it still runs.
+  unmatched: run
+
+storage:
+  dir: .agentci
+  record_traces: true
+  retention_days: 30
+
+report:
+  json: true
+  markdown: true
+  html: false
+  ci_annotations: true
+  ci_summary: true
+  trace_excerpt_events: 40
+
+tests:
+  - file: tests/agentci/test_support_agent.py
+  - file: tests/agentci/test_policy.py

@@ -1,0 +1,20 @@
+# Normalize to LF in the repository so diffs and hashes are stable across
+# contributors on Windows, macOS, and Linux.
+* text=auto eol=lf
+
+# Shell scripts must stay LF or they break on Unix.
+*.sh text eol=lf
+
+# These are Windows-only by definition.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.whl binary
+*.zip binary

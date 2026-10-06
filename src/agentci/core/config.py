@@ -410,20 +410,32 @@ class Config(_Strict):
     def agent_display_name(self) -> str:
         return self.agent.name or self.project.name
 
-    def test_files(self) -> list[str]:
-        """Expand ``tests`` into concrete file paths, honouring ``dir`` globs."""
+    def test_files(self, base: Path | None = None) -> list[str]:
+        """Expand ``tests`` into concrete file paths, honouring ``dir`` globs.
+
+        ``dir`` entries are globbed relative to ``base`` — the project root — and
+        not the process working directory, so ``agentci run --root <dir>`` resolves
+        the same files no matter where it is invoked from. Returned paths are
+        relative to ``base`` when they live under it, keeping error messages short.
+        """
+        root = base or Path.cwd()
         expanded: list[str] = []
         for entry in self.tests:
             if entry.file:
                 expanded.append(entry.file)
                 continue
             assert entry.dir is not None  # narrowed by TestFileConfig validator
-            root = Path(entry.dir)
-            if not root.exists():
+            directory = Path(entry.dir)
+            if not directory.is_absolute():
+                directory = root / directory
+            if not directory.exists():
                 continue
-            expanded.extend(
-                str(p) for p in sorted(root.rglob(entry.pattern)) if p.is_file()
-            )
+            for path in sorted(directory.rglob(entry.pattern)):
+                if not path.is_file():
+                    continue
+                expanded.append(
+                    str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+                )
         return expanded
 
 
@@ -583,7 +595,7 @@ def resolve_test_files(config: Config, root: Path | None = None) -> list[Path]:
     base = root or Path.cwd()
     resolved: list[Path] = []
     missing: list[str] = []
-    for raw in config.test_files():
+    for raw in config.test_files(base):
         candidate = Path(raw)
         full = candidate if candidate.is_absolute() else base / candidate
         if not full.exists():

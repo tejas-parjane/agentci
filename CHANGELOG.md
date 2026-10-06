@@ -7,6 +7,30 @@ All notable changes to AgentCI are recorded here. The format follows
 The **report schema** is versioned independently of the package: consumers that
 parse `report.json` should pin `schema_version`, not the release.
 
+## [Unreleased]
+
+### Added
+
+- **Change-aware selection.** `agentci run --changed` skips the tests a diff
+  cannot affect, using `dependencies=` declared on `@agent_test`. Diffing runs
+  from the merge base to the working tree, so uncommitted and untracked work
+  counts as a change. `--base` overrides the ref; otherwise `AGENTCI_BASE`,
+  `GITHUB_BASE_REF`, `origin/main`, and `selection.default_base` are consulted in
+  that order.
+- **`agentci gate`**, the release verdict: always selects, prints
+  `RELEASE GATE: PASS` or `RELEASE GATE: BLOCKED` with the reasons, and exits 0
+  or non-zero. Warnings block by default (`--allow-warn` relaxes them), and a
+  base ref that cannot be resolved blocks on its own.
+- `run.selection_base` and `run.selection_changed` in `report.json`, both
+  additive and defaulted, so `schema_version` stays 1.
+- `tests/test_selection.py` and `tests/test_gate.py`.
+
+### Changed
+
+- `default_base_ref()` and `changed_files()` take an explicit working directory.
+  Without one they probed the process working directory for `origin/main`, which
+  is not necessarily the project under test.
+
 ## [0.1.0] - 2026-10-06
 
 First release. Everything below is new.

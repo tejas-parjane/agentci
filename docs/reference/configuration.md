@@ -189,16 +189,56 @@ literal-secret substitution.
 
 ## `selection`
 
-Change-aware selection. A test with no declared dependency cannot be proven
-unaffected by a change, so `unmatched: run` (the default) still runs it.
+Change-aware selection: skip the tests a diff cannot affect. Activate it on a
+single run with `agentci run --changed`, or make it the release verdict with
+`agentci gate`, which always turns it on.
 
 ```yaml
 selection:
   enabled: true
   unmatched: run        # run | skip
-  default_base: null
-  global_paths: []
+  default_base: null    # last resort when neither --base nor the CI env has one
+  global_paths:         # a change here runs every test
+    - agentci.yaml
+    - agentci.yml
+    - .agentci.yaml
 ```
+
+A test opts in by declaring what it reads:
+
+```python
+@agent_test(dependencies=["prompts/*.txt", "tools/*"])
+def test_refund(agent): ...
+```
+
+Patterns are repo-relative POSIX globs. `*` and `?` stay inside one path
+segment (`tools/*.py` does **not** match `tools/a/b.py`), `**` spans directories,
+and a pattern with no glob characters also matches everything underneath it —
+`dependencies: [examples/support_agent]` means the directory and its contents.
+
+**Base resolution**, in order: the `--base` flag, then `AGENTCI_BASE` /
+`GITHUB_BASE_REF`, then `origin/main` (or `origin/master`), then
+`default_base`. The diff runs from the merge base of that ref and `HEAD` to the
+**working tree**, so uncommitted and untracked work counts as a change too.
+
+**Safety rules.** These are not configurable, because each one fails toward
+running more tests rather than fewer:
+
+- If no base resolves, nothing is skipped and the run carries a warning.
+- `unmatched: run` (the default) runs a test that declares no dependencies.
+- `unmatched: skip` skips it, recording
+  `change-aware selection: declares no dependencies, and selection.unmatched is
+  'skip'` as the reason on the test itself.
+- A change to any `global_paths` entry runs everything.
+
+Skips are never silent: each one records `no change to <patterns> since <base>`
+in the report, and the run warns `change-aware selection skipped N of M test(s)`.
+
+`agentci gate` treats those warnings as blocking (pass `--allow-warn` to relax
+them) and blocks outright on an unresolvable base, which `--allow-warn` does not
+lift — see [ADR-0009](../adr/0009-change-aware-selection.md). Set
+`enabled: false` to turn selection off entirely; both commands then run the full
+suite.
 
 ---
 

@@ -25,10 +25,10 @@ python scripts/verify.py
 ```
 
 The fourth one is the one people skip and should not. It runs the worked example
-suite and then asserts that **seven probes fail** — a credential leak, a step
-limit, a policy denial, a bare `assert`, an infrastructure fault, and two more.
-If you change something that makes a probe pass, `verify.py` exits non-zero.
-That is the harness testing itself.
+suite and then asserts that **eight probes fail** — a credential leak, a step
+limit, a policy denial, a double-refund regression, a bare `assert`, an
+infrastructure fault, and two more. If you change something that makes a probe
+pass, `verify.py` exits non-zero. That is the harness testing itself.
 
 All four must pass before a pull request is reviewed.
 

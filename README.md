@@ -8,6 +8,14 @@ gives agent behaviour the thing ordinary tests cannot: assertions on **what the
 agent actually did** — which tools it called, in what order, at what cost, under
 what policy — recorded as a normal test suite you run in CI.
 
+Two commands make that suite do release work:
+
+- `agentci run` runs tests *a diff can affect*, so a feedback loop that grows with
+  the agent stays fast instead of slowing the whole repository down with it.
+- `agentci gate` turns the same suite into a **release verdict**: it diffs the
+  change, runs only what is affected, and either prints `RELEASE GATE: PASS` and
+  exits 0, or prints the reasons and blocks.
+
 ```python
 from agentci.assertions import expect
 from agentci.testing import agent_test
@@ -26,7 +34,7 @@ def test_refund_is_approved_with_a_policy_check(agent):
 ## Install
 
 ```bash
-pip install agentci-py
+pip install git+https://github.com/tejas-parjane/agentci.git
 ```
 
 Requires Python 3.11 or newer.
@@ -59,6 +67,38 @@ object exposing a tool registry, or a plain function `(user_input) -> AgentResul
 Tools the agent invokes through `ctx.tools` are traced, mocked, and subject to the
 policy in `agentci.yaml`.
 
+## The release gate
+
+`agentci gate` is how a change gets a *verdict* instead of a checkmark. It is
+`agentci run` with every safety net on at once:
+
+- **Change-aware selection is always on.** The suite is diffed against a base ref
+  and only the tests this change can affect are run; the rest are skipped with a
+  recorded reason. `--base <ref>` overrides the base; otherwise it resolves from
+  `AGENTCI_BASE`, then `GITHUB_BASE_REF`, then `origin/main`, then
+  `selection.default_base`.
+- **Warnings block the release by default.** `--allow-warn` relaxes them.
+- **An unresolvable base ref blocks on its own.** `run` falls back to running
+  everything in that case (developer-friendly); `gate` refuses to guess
+  (release-strict), because a release the harness cannot scope to a diff is
+  unverifiable.
+
+A blocked gate prints the verdict *with the reasons*:
+
+```text
+RELEASE GATE: BLOCKED
+  - change-aware selection unavailable: no base ref could be determined; pass --base,
+    set AGENTCI_BASE, or configure selection.default_base
+  - the run failed: 1 failing test(s); 1 failing assertion(s)
+```
+
+and exits 0 when it is safe to ship, non-zero when it is not. That is the whole
+loop: *write a test for the behaviour that must never break, break the agent,
+watch the gate name the reason.* The bundled support-agent example ships with a
+deliberately regressed refund flow in
+`examples/support_agent/refund_regression.py`; point `agentci gate` at it and the
+blocked verdict points straight at the money.
+
 ## What you can assert
 
 | Group | Examples |
@@ -86,7 +126,9 @@ These are enforced by tests, not just documented:
   `delete_ticket`, `send_email`, and any other tool marked as side-effecting, unless
   it is mocked. Mocks are checked first, because they are not real side effects.
 - **Tests without dependencies run by default.** Change-aware selection (`unmatched`)
-  only skips a test it can prove is unaffected.
+  only skips a test it can prove is unaffected, not the other way around: no
+  `--changed`, no diff, or an unresolvable base never silently reduces coverage. `run`
+  warns and runs everything; `gate` treats that as an unverifiable release and blocks.
 
 ## Configuration
 
@@ -132,7 +174,8 @@ agentci config
 
 | Command | Purpose |
 | --- | --- |
-| `agentci run` (alias `test`) | Run the suite |
+| `agentci run` (alias `test`) | Run the suite (optionally `--changed`) |
+| `agentci gate` | The release verdict: diff-select, strict, prints reasons, exits 0/non-zero |
 | `agentci list` | Show discovered tests without running them |
 | `agentci init` | Scaffold config, a starter test, and an adapter |
 | `agentci config` | Validate `agentci.yaml`, print the resolved config |
@@ -142,6 +185,8 @@ agentci config
 
 Selection: `--tag` / `-k` (repeatable), `--test-id` (repeatable), `--name`
 (substring), `--repeat`, `--fail-on-warn`, `--no-traces`, `--json`, `--output FILE`.
+Change-aware: `--changed` (run) and `--base <ref>` (run and gate) choose what a diff
+can affect.
 
 ### Exit codes
 
@@ -161,15 +206,26 @@ difference between an agent that regressed and a harness that broke:
 ## CI integration
 
 On GitHub Actions, AgentCI writes workflow annotations for failed tests and a
-Markdown block to `$GITHUB_STEP_SUMMARY`:
+Markdown block to `$GITHUB_STEP_SUMMARY`. Run the suite on pull requests and put
+`agentci gate` (exit 0 == ship) in the release job:
 
 ```yaml
+# .github/workflows/pr.yml — catch regressions on the branch
 - uses: actions/setup-python@v5
   with:
     python-version: "3.12"
-- run: pip install agentci-py
-- run: agentci run
+- run: pip install git+https://github.com/tejas-parjane/agentci.git
+- run: agentci run --changed
+
+# .github/workflows/release.yml — the verdict before shipping
+- run: pip install git+https://github.com/tejas-parjane/agentci.git
+- run: |
+    PREV=$(git describe --tags --abbrev=0 HEAD^ || echo origin/main)
+    agentci gate --base "$PREV"
 ```
+
+Because `gate` is change-aware, the release job scopes to *this* release's diff —
+the tests affected since the last release tag — and blocks unless they pass.
 
 Reports land in `.agentci/reports/`:
 
@@ -202,9 +258,14 @@ worth knowing:
 
 ## Status
 
-Version 0.1.0 is the first release of the core runtime, assertion library, policy
-engine, CLI, and report schema. The report schema is versioned independently of
-the package so consumers can pin the shape they parse.
+Version 0.1.0 shipped the core runtime, assertion library, policy engine, CLI, and
+report schema. The report schema is versioned independently of the package so
+consumers can pin the shape they parse.
+
+Since 0.1.0, change-aware selection (`--changed`, diff + `dependencies=`) and the
+`agentci gate` release verdict are in place, along with a realistic
+customer-support refund example that ships with a deliberate regression the suite
+catches.
 
 Not yet wired up:
 
@@ -236,10 +297,11 @@ pytest                # unit tests
 python scripts/verify.py   # example suite + negative-path probes
 ```
 
-`scripts/verify.py` runs seven probes that must **fail** — a credential leak, a
-step limit, a policy denial, and so on. A probe that passes is a regression in
-AgentCI itself. See [CONTRIBUTING.md](CONTRIBUTING.md) for what a change needs
-before it is ready for review.
+`scripts/verify.py` runs the example suite plus eight probes that must **fail** —
+a credential leak, a step limit, a policy denial, a double-refund regression, and
+so on. A probe that passes is a regression in AgentCI itself. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for what a change needs before it is ready for
+review.
 
 ## License
 

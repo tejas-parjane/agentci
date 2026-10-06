@@ -111,11 +111,11 @@ def _select(
     selection_reason: str,
     changed: bool = False,
     base: str | None = None,
-) -> tuple[list[AgentTestCase], RunOptions]:
+) -> tuple[list[AgentTestCase], RunOptions, SelectionPlan | None]:
     # Resolved first so that an explicit --test-id / --name / --tag, which are more
     # specific, overwrites the diff as the stated selection reason.
     plan: SelectionPlan | None = build_plan(config, root, base=base) if changed else None
-    if plan is not None:
+    if plan is not None and plan.enabled:
         selected_by = "diff"
         selection_reason = plan.base or plan.unresolved
 
@@ -142,7 +142,7 @@ def _select(
         record_traces=False if no_traces else None,
         fail_on_warn=fail_on_warn,
         root=root,
-    )
+    ), plan
 
 
 def _write_github_outputs(report: RunReport) -> None:
@@ -249,7 +249,7 @@ def run_command(
     """Run the agent test suite and exit with a CI-friendly code."""
     with _handle_errors():
         loaded, base = _load(config, root)
-        cases, options = _select(
+        cases, options, _ = _select(
             loaded,
             base,
             tags=tag,
@@ -279,6 +279,125 @@ def run_command(
             _render_terminal(report, quiet=quiet)
         _write_github_outputs(report)
         raise typer.Exit(_exit_code(report))
+
+
+def _gate_reasons(
+    report: RunReport, plan: SelectionPlan | None, *, allow_warn: bool
+) -> list[str]:
+    """Why this change may not ship, in the order a maintainer should read them.
+
+    The selection reason comes first because it is the only one that survives
+    ``--allow-warn``: a release it cannot scope to a diff is unverifiable, not
+    merely noisy, so relaxing warnings must never relax it.
+    """
+    reasons: list[str] = []
+    if plan is not None and plan.unresolved:
+        reasons.append(f"change-aware selection unavailable: {plan.unresolved}")
+    if not allow_warn:
+        reasons.extend(
+            warning
+            for warning in report.warnings
+            # The runner records the same fact as a warning, and _render_terminal
+            # already printed it; listing it twice would read as two problems.
+            if not warning.startswith("change-aware selection unavailable:")
+        )
+
+    if report.status is Status.ERROR:
+        reasons.append(
+            f"the run errored: {report.summary.errored} test(s) hit an "
+            "infrastructure fault"
+        )
+    elif report.status is Status.FAIL:
+        detail: list[str] = []
+        if report.summary.failed:
+            detail.append(f"{report.summary.failed} failing test(s)")
+        if report.summary.warned:
+            detail.append(f"{report.summary.warned} test(s) with warnings")
+        if report.summary.assertions_failed:
+            detail.append(f"{report.summary.assertions_failed} failing assertion(s)")
+        failed_gates = [g.name for g in report.gates if g.status is Status.FAIL]
+        if failed_gates:
+            detail.append("failing gate(s): " + ", ".join(failed_gates))
+        if report.regression.status is Status.FAIL:
+            detail.append("regressed against the stored baseline")
+        reasons.append("the run failed: " + "; ".join(detail))
+    elif report.status is Status.SKIP:
+        reasons.append("no tests ran")
+    return reasons
+
+
+def _render_gate(report: RunReport, reasons: list[str], *, quiet: bool) -> None:
+    _render_terminal(report, quiet=quiet)
+    if reasons:
+        Console(style="red").print("RELEASE GATE: BLOCKED")
+        for reason in reasons:
+            Console(style="red").print(f"  - {reason}")
+    else:
+        Console(style="green").print("RELEASE GATE: PASS")
+
+
+@app.command("gate")
+def gate_command(
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to agentci.yaml."),
+    root: Path | None = typer.Option(None, "--root", help="Project root; all paths resolve under it."),
+    base_ref: str | None = typer.Option(
+        None,
+        "--base",
+        help="Ref to diff against. Defaults to AGENTCI_BASE, then origin/main.",
+    ),
+    allow_warn: bool = typer.Option(
+        False, "--allow-warn", help="Report warnings without blocking the release."
+    ),
+    no_traces: bool = typer.Option(False, "--no-traces", help="Skip writing run artifacts."),
+    json_out: bool = typer.Option(False, "--json", help="Print the JSON report to stdout."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Only print the summary line."),
+    output: Path | None = typer.Option(None, "--output", help="Write the JSON report to this path."),
+) -> None:
+    """Decide whether this change is safe to release.
+
+    Three things separate this from `run`: change-aware selection is always on, so
+    the verdict covers the tests this diff can affect; warnings block by default
+    (pass --allow-warn to relax that); and a base ref that cannot be resolved blocks
+    on its own, because a release the harness cannot scope to a diff is unverifiable.
+    `run` stays developer-friendly and runs everything in that case — `gate` does not.
+    """
+    with _handle_errors():
+        loaded, base = _load(config, root)
+        cases, options, plan = _select(
+            loaded,
+            base,
+            tags=[],
+            test_ids=[],
+            pattern=None,
+            repeat=None,
+            fail_on_warn=not allow_warn,
+            no_traces=no_traces,
+            selected_by="all",
+            selection_reason="",
+            changed=True,
+            base=base_ref,
+        )
+        if not cases:
+            err_console.print("no tests selected")
+            raise typer.Exit(ExitCode.NO_TESTS.value)
+
+        report = TestRunner(loaded, options=options).run(cases)
+        reasons = _gate_reasons(report, plan, allow_warn=allow_warn)
+
+        if json_out:
+            console.print_json(render_json(report))
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(render_json(report), encoding="utf-8")
+
+        if not json_out:
+            _render_gate(report, reasons, quiet=quiet)
+
+        if report.status is Status.ERROR:
+            raise typer.Exit(ExitCode.INFRA_ERROR.value)
+        if reasons:
+            raise typer.Exit(ExitCode.GATE_FAILED.value)
+        raise typer.Exit(ExitCode.PASS.value)
 
 
 @app.command("list")

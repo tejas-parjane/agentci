@@ -1,4 +1,4 @@
-﻿"""Tests for baseline comparison (PRD FR-5, 19).
+"""Tests for baseline comparison (PRD FR-5, 19).
 
 Two properties are load-bearing here. An *unevaluated* regression check is an
 unknown, and 19 forbids rendering an unknown as a pass, so every path where no

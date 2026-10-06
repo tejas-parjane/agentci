@@ -130,7 +130,7 @@ def no_policy_violations(violations: Sequence[PolicyViolation]) -> AssertionResu
 
 
 def no_external_side_effects(trace: Trace) -> AssertionResult:
-    """Assert every tool call actually executed against a real target.
+    """Assert no tool call executed against a real target.
 
     ``MOCKED`` and ``DENIED`` statuses are fine; anything that ran live is not.
     This is a testable expression of AC-10.

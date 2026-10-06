@@ -181,6 +181,17 @@ class Redactor:
         """Names of the pattern classes this redactor can detect and scrub."""
         return frozenset(p.name for p in self._patterns)
 
+    @classmethod
+    def available_pattern_names(cls) -> frozenset[str]:
+        """Names of every built-in pattern class, active on this redactor or not.
+
+        ``pattern_names`` is what *this* instance is configured to scrub;
+        this is the wider catalog a caller may still ask to scan for. Asking
+        :meth:`find_leaks` for one of these always works, even when the pattern
+        is not part of the default redaction set.
+        """
+        return frozenset(_PATTERNS_BY_NAME)
+
     @property
     def secrets(self) -> tuple[str, ...]:
         """Literal secret values this redactor scrubs. Never include in output."""

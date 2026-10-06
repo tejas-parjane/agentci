@@ -38,6 +38,22 @@ def _surfaces(trace: Trace, output_text: str) -> list[tuple[str, str]]:
     return surfaces
 
 
+def _known_pattern_names(redactor: Any) -> frozenset[str]:
+    """Pattern names :func:`not_leak` accepts as names rather than literals.
+
+    The catalog is deliberately wider than the redactor's active set: ``email``
+    is not scrubbed by default, but a test may still ask for it. Treating an
+    unknown name as a literal would turn that request into a search for the
+    word "email" -- a scan that cannot fail. Names outside the catalog are
+    still literals, so project identifiers like ``ACCT-9931`` keep working.
+    """
+    names = set(getattr(redactor, "pattern_names", frozenset()))
+    catalog = getattr(redactor, "available_pattern_names", None)
+    if callable(catalog):
+        names |= set(catalog())
+    return frozenset(names)
+
+
 def not_leak(
     trace: Trace,
     output_text: str,
@@ -61,7 +77,7 @@ def not_leak(
             reason="no patterns were given",
         )
 
-    known: frozenset[str] = getattr(redactor, "pattern_names", frozenset())
+    known = _known_pattern_names(redactor)
     findings: list[str] = []
     surfaces = _surfaces(trace, output_text)
 

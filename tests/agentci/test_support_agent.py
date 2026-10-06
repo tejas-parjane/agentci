@@ -14,7 +14,19 @@ Run it with::
 from __future__ import annotations
 
 from agentci.assertions import expect
+from agentci.core.trace import EventStatus, EventType
 from agentci.testing import agent_test
+
+
+def _calls(agent, tool: str):
+    """Every traced invocation of ``tool``, so a test can inspect real statuses."""
+    return [
+        event
+        for event in agent.ctx.recorder.events
+        if event.type is EventType.TOOL_CALL_COMPLETED
+        and event.tool is not None
+        and event.tool.name == tool
+    ]
 
 
 @agent_test(tags=["smoke"], dependencies=["examples/support_agent/**"])
@@ -84,3 +96,45 @@ def test_answer_mentions_the_ticket(agent):
 
     expect(result).to_match(r"T-1001|refund")
     expect(result).to_not_contain("Traceback")
+
+
+@agent_test(tags=["refund"], dependencies=["examples/support_agent/**"])
+def test_refund_is_issued_and_confirmed(agent):
+    """A refundable order is refunded, and money only ever moves through a mock.
+
+    ``to_have_no_live_side_effects`` is deliberately *not* asserted here: the
+    read-only ``lookup_order``/``lookup_customer`` lookups run live (they are
+    pure), so the assertion that matters is that the two side-effecting tools are
+    recorded ``mocked`` -- that is where money moved, so that is what has to be.
+    """
+    result = agent.run("Please refund order ORD-7781")
+
+    expect(result).to_contain("Refunded $49.99")
+    expect(result).to_call_tool_with("refund_order", order_id="ORD-7781", amount=49.99)
+    expect(result).to_use_tool("send_email")
+    # PII stays inside the tool argument; the customer is told where the receipt
+    # went, not handed their own address back.
+    expect(result).to_not_contain("ravi.menon@example.com")
+
+    refunds = _calls(agent, "refund_order")
+    assert refunds, "the refund call should be traced"
+    assert all(event.status is EventStatus.MOCKED for event in refunds)
+
+    emails = _calls(agent, "send_email")
+    assert emails, "the email should be traced"
+    assert all(event.status is EventStatus.MOCKED for event in emails)
+
+
+@agent_test(tags=["refund", "policy"], dependencies=["examples/support_agent/**"])
+def test_a_refunded_order_is_not_refunded_twice(agent):
+    """The eligibility gate is the whole point of the refund flow.
+
+    Order ORD-7782 was already refunded; refunding it again is the bug the
+    regressed fixture under ``examples/support_agent/refund_regression.py``
+    reintroduces. The correct agent must stop before touching money or an inbox.
+    """
+    result = agent.run("Please refund order ORD-7782")
+
+    expect(result).to_contain("not eligible")
+    expect(result).to_not_use_tool("refund_order")
+    expect(result).to_not_use_tool("send_email")

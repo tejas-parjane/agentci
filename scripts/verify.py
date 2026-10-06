@@ -100,6 +100,16 @@ def negative_paths() -> int:
             lambda agent: expect(agent.run("T-1001")).to_contain("no such text"),
             "assertion genuinely fails",
         ),
+        probe(
+            # The deliberate regression under refund_regression.py drops the
+            # eligibility check, so the *correct* test -- the one the double-refund
+            # guard in test_support_agent.py runs -- must flag it. This is the
+            # whole "a real bug is caught" story of the gate.
+            "examples.support_agent.refund_regression:SupportAgentWithRefundBug",
+            lambda agent: expect(agent.run("Please refund order ORD-7782"))
+            .to_contain("not eligible"),
+            "double-refund regression caught",
+        ),
     ]
     missed = [i for i, ok in enumerate(checks, 1) if not ok]
     if missed:

@@ -24,12 +24,24 @@ parse `report.json` should pin `schema_version`, not the release.
 - `run.selection_base` and `run.selection_changed` in `report.json`, both
   additive and defaulted, so `schema_version` stays 1.
 - `tests/test_selection.py` and `tests/test_gate.py`.
+- `examples/support_agent/refund_regression.py`, a deliberately regressed refund
+  flow that the shipped expectations catch, plus its probe in `scripts/verify.py`.
+- `tests/test_policy_assertions.py`.
 
 ### Changed
 
 - `default_base_ref()` and `changed_files()` take an explicit working directory.
   Without one they probed the process working directory for `origin/main`, which
   is not necessarily the project under test.
+- The forbidden-data checks (`forbidden_data_patterns` policy and
+  `to_not_contain_forbidden_data`) attribute a hit to the configured pattern
+  only. They previously used `contains_secret`, which is true when *any* active
+  pattern matches, so a tool result carrying an email could be reported as a
+  `credit_card` violation.
+- The bundled support agent now has a refund flow with an overridable
+  `refund_decision`, read-only `lookup_customer`/`lookup_order` tools, and mocked
+  `refund_order`/`send_email` side effects, with `lookup_customer`, `lookup_order`,
+  `refund_order`, and `send_email` added to the allowlist.
 
 ## [0.1.0] - 2026-10-06
 

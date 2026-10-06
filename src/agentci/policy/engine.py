@@ -271,9 +271,9 @@ class PolicyEngine:
                 text = str(blob)
                 for pattern in patterns:
                     hit = (
-                        pattern in known and self.context.redactor.contains_secret(
-                            text, extra_patterns=[pattern]
-                        )
+                        pattern in known
+                        and pattern
+                        in self.context.redactor.find_leaks(text, extra_patterns=[pattern])
                     ) or (pattern not in known and pattern in text)
                     if hit:
                         out.append(

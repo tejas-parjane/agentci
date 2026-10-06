@@ -5,6 +5,8 @@ assert on is observable through the trace:
 
 * a read-only lookup tool, so ``to_use_tool`` has something to check
 * a write tool flagged ``side_effect=True``, so policy has something to refuse
+* a refund flow that must check eligibility *before* it touches money, which is
+  the kind of ordering bug a regression test exists to catch
 * deterministic output, so the example suite does not flake
 
 Several run styles are provided, because AgentCI must accept all of them and
@@ -25,6 +27,7 @@ from __future__ import annotations
 import itertools
 import re
 import time
+from dataclasses import dataclass
 
 from agentci.adapters.base import BaseAdapter
 from agentci.core.context import RunContext
@@ -67,14 +70,22 @@ ANSWERS: dict[str, str] = {
 }
 
 UNKNOWN_TICKET = "I could not find that ticket. Could you share the ticket number?"
+UNKNOWN_ORDER = "I could not find that order. Could you share the order number?"
 
 _TICKET_RE = re.compile(r"\bT-\d{4}\b", re.IGNORECASE)
+_ORDER_RE = re.compile(r"\bORD-\d{4}\b", re.IGNORECASE)
 _ESCALATE_WORDS = ("urgent", "escalate", "complain")
 
 
 def ticket_id_in(text: str) -> str:
     """Extract a ticket id from free-form user input."""
     match = _TICKET_RE.search(text)
+    return match.group(0).upper() if match else ""
+
+
+def order_id_in(text: str) -> str:
+    """Extract an order id from free-form user input."""
+    match = _ORDER_RE.search(text)
     return match.group(0).upper() if match else ""
 
 
@@ -98,13 +109,74 @@ def usage_for(prompt: str, completion: str) -> TokenUsage:
     )
 
 
+@dataclass(frozen=True)
+class Order:
+    """A purchase, and the unit the refund flow reasons about."""
+
+    id: str
+    customer_id: str
+    amount: float
+    status: str
+    refundable: bool
+    reason: str = ""
+
+
+ORDERS: dict[str, Order] = {
+    "ORD-7781": Order(
+        id="ORD-7781",
+        customer_id="C-4471",
+        amount=49.99,
+        status="delivered",
+        refundable=True,
+    ),
+    "ORD-7782": Order(
+        id="ORD-7782",
+        customer_id="C-4471",
+        amount=129.0,
+        status="refunded",
+        refundable=False,
+        reason="already refunded on 2026-01-14",
+    ),
+}
+
+#: Read-only customer records. ``email`` is used as a *tool argument* only --
+#: echoing it into the answer would put PII in the artifact for no benefit, so
+#: the agent tells the user a confirmation went to "the address on file".
+CUSTOMERS: dict[str, dict[str, str]] = {
+    "C-4471": {"id": "C-4471", "name": "Ravi Menon", "email": "ravi.menon@example.com"},
+    "C-4472": {"id": "C-4472", "name": "Dana Okafor", "email": "dana.okafor@example.com"},
+}
+
+
 def lookup_ticket(ticket_id: str) -> dict[str, str] | None:
     """The read-only tool implementation. Pure, so it is safe to call live."""
     return TICKETS.get(ticket_id)
 
 
+def lookup_customer(customer_id: str) -> dict[str, str] | None:
+    """Read-only, pure, and safe to call live."""
+    return CUSTOMERS.get(customer_id)
+
+
+def lookup_order(order_id: str) -> Order | None:
+    """Read-only, pure, and safe to call live."""
+    return ORDERS.get(order_id)
+
+
 class SupportAgent(BaseAdapter):
-    """Records live through ``ctx.recorder``; tools resolve via config mocks."""
+    """Records live through ``ctx.recorder``; side effects resolve via config mocks.
+
+    The read-only lookups that the refund flow needs (``lookup_customer``,
+    ``lookup_order``) declare a ``live`` implementation and really execute --
+    they are pure, and ``lookup_order`` has to answer for more than one order,
+    which a single config mock cannot do. ``lookup_ticket`` is instead mocked from
+    config, because demonstrating that mechanism is what it is there for;
+    :class:`LiveSupportAgent` flips it live.
+
+    The two tools that touch money or a human inbox are ``side_effect=True`` and
+    have no live implementation at all: only a configured mock lets them run,
+    which is what makes ``to_have_no_live_side_effects`` mean something.
+    """
 
     name = "support-agent"
 
@@ -114,12 +186,36 @@ class SupportAgent(BaseAdapter):
             side_effect=False,
             description="Fetch a support ticket by id.",
         ),
+        "lookup_customer": ToolDecl(
+            name="lookup_customer",
+            live=lookup_customer,
+            side_effect=False,
+            description="Fetch a customer record by id.",
+        ),
+        "lookup_order": ToolDecl(
+            name="lookup_order",
+            live=lookup_order,
+            side_effect=False,
+            description="Fetch an order by id.",
+        ),
         # Mocked in agentci.yaml, so calling it is safe and the trace records it
         # as `mocked`.
         "escalate_ticket": ToolDecl(
             name="escalate_ticket",
             side_effect=True,
             description="Escalate a ticket to a human agent.",
+        ),
+        # Money leaving the building. Mocked, never live.
+        "refund_order": ToolDecl(
+            name="refund_order",
+            side_effect=True,
+            description="Refund an order to the original payment method.",
+        ),
+        # PII leaving the building. Mocked, never live.
+        "send_email": ToolDecl(
+            name="send_email",
+            side_effect=True,
+            description="Email the customer.",
         ),
         # Deliberately *not* mocked, and with no live implementation. Any attempt
         # to reach it must be refused by policy -- this is the tool that proves the
@@ -131,11 +227,48 @@ class SupportAgent(BaseAdapter):
         ),
     }
 
+    def refund_decision(self, order: Order) -> tuple[bool, str]:
+        """Whether this order may be refunded, plus the answer either way.
+
+        A method rather than an inline branch so the regression fixture can
+        override exactly this decision and nothing else -- see
+        :mod:`examples.support_agent.refund_regression`.
+        """
+        if not order.refundable:
+            detail = f" ({order.reason})" if order.reason else ""
+            return False, f"Order {order.id} is not eligible for a refund{detail}."
+        return True, (
+            f"Refunded ${order.amount:.2f} for order {order.id}. "
+            "A confirmation was sent to the address on file."
+        )
+
+    def _handle_refund(self, order_id: str, ctx: RunContext) -> str:
+        """The refund flow: look it up, decide, then -- and only then -- act."""
+        order = ctx.tools.call("lookup_order", order_id=order_id)
+        if order is None:
+            return UNKNOWN_ORDER
+
+        proceed, answer = self.refund_decision(order)
+        if not proceed:
+            return answer
+
+        customer = ctx.tools.call("lookup_customer", customer_id=order.customer_id)
+        ctx.tools.call("refund_order", order_id=order.id, amount=order.amount)
+        ctx.tools.call(
+            "send_email",
+            to=(customer or {}).get("email", "the address on file"),
+            subject=f"Your refund for {order.id}",
+            body=answer,
+        )
+        return answer
+
     def run(self, user_input: str, ctx: RunContext) -> AgentResult:
         ticket_id = ticket_id_in(user_input)
+        order_id = order_id_in(user_input)
         escalate = wants_escalation(user_input)
 
         ctx.set("ticket_id", ticket_id)
+        ctx.set("order_id", order_id)
 
         with ctx.recorder.model_call(MODEL) as call:
             call.result = user_input
@@ -153,7 +286,9 @@ class SupportAgent(BaseAdapter):
                     reason="user asked for escalation",
                 )
 
-            answer = ANSWERS.get(ticket_id or "", UNKNOWN_TICKET)
+            answer = self._handle_refund(order_id, ctx) if order_id else ""
+            if not answer:
+                answer = ANSWERS.get(ticket_id or "", UNKNOWN_TICKET)
             call.result = answer
             call.usage = usage_for(user_input, answer)
 
@@ -163,6 +298,7 @@ class SupportAgent(BaseAdapter):
                 "model": MODEL,
                 "agent_version": "1.0.0",
                 "ticket_id": ticket_id,
+                "order_id": order_id,
                 "found": bool(record),
                 "escalated": escalate,
             },
@@ -173,16 +309,18 @@ class LiveSupportAgent(SupportAgent):
     """Same shape, but ``lookup_ticket`` really executes.
 
     Useful for proving that a live call and a mocked call are indistinguishable
-    to assertions -- only the recorded result differs.
+    to assertions -- only the recorded result differs. Every other tool is
+    inherited, so the two agents are comparable tool for tool.
     """
 
     tools = {
+        **SupportAgent.tools,
         "lookup_ticket": ToolDecl(
             name="lookup_ticket",
             live=lookup_ticket,
             side_effect=False,
             description="Fetch a support ticket by id.",
-        )
+        ),
     }
 
 
@@ -319,12 +457,18 @@ def run_agent_undeclared_tool(user_input: str, ctx: RunContext) -> AgentResult:
 
 __all__ = [
     "ANSWERS",
+    "CUSTOMERS",
     "MODEL",
+    "ORDERS",
     "TICKETS",
     "LiveSupportAgent",
     "LoopingAgent",
+    "Order",
     "SupportAgent",
+    "lookup_customer",
+    "lookup_order",
     "lookup_ticket",
+    "order_id_in",
     "reset_flaky_counter",
     "run_agent",
     "run_agent_flaky",

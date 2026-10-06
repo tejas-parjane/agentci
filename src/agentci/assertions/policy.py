@@ -181,7 +181,7 @@ def forbidden_data_absent(trace: Trace, redactor: Any, patterns: Sequence[str]) 
             continue
         for pattern in patterns:
             if pattern in redactor.pattern_names:
-                if redactor.contains_secret(blob, extra_patterns=[pattern]):
+                if pattern in redactor.find_leaks(blob, extra_patterns=[pattern]):
                     findings.append(f"{pattern} in {name}")
             elif pattern in blob:
                 findings.append(f"{pattern!r} in {name}")

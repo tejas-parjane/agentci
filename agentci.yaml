@@ -30,8 +30,12 @@ policies:
   # side-effect gate would never be exercised.
   allowed_tools:
     - lookup_ticket
+    - lookup_customer
+    - lookup_order
     - escalate_ticket
     - delete_ticket
+    - refund_order
+    - send_email
   denied_tools: []
   approval_required: []
   forbidden_data_patterns:
@@ -56,12 +60,15 @@ redaction:
   scrub_environment: true
 
 # Escalating a ticket changes state outside the process, so it is denied unless a
-# test explicitly grants an approval.
+# test explicitly grants an approval. Refunding money and emailing a customer are
+# the same kind of commitment, so they are handled the same way: mocked, never live.
 execution:
   external_side_effects: deny
   side_effecting_tools:
     - escalate_ticket
     - delete_ticket
+    - refund_order
+    - send_email
   mocks:
     lookup_ticket:
       response:
@@ -74,6 +81,15 @@ execution:
       response:
         escalated: true
         queue: human
+    refund_order:
+      response:
+        refunded: true
+        amount_refunded: 49.99
+        settlement_days: 5
+    send_email:
+      response:
+        queued: true
+        message_id: msg-8841
 
 gates:
   policy_compliance: "== 1.0"

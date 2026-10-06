@@ -17,8 +17,13 @@ from pathlib import Path
 GIT_TIMEOUT_S = 10.0
 
 
-def _git(*args: str, cwd: Path | None = None) -> str | None:
-    """Run a git command, returning stripped stdout or ``None`` on any failure."""
+def _run_git(*args: str, cwd: Path | None = None) -> tuple[bool, str]:
+    """Run a git command. ``(False, "")`` on failure, ``(True, stdout)`` on success.
+
+    Split from :func:`_git` because a *successful* command with empty output and a
+    command that failed are indistinguishable once collapsed to ``None``, and
+    change-aware selection has to tell "no files changed" from "git did not run".
+    """
     try:
         completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
             ["git", *args],
@@ -29,11 +34,16 @@ def _git(*args: str, cwd: Path | None = None) -> str | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return False, ""
     if completed.returncode != 0:
-        return None
-    value = completed.stdout.strip()
-    return value or None
+        return False, ""
+    return True, completed.stdout.strip()
+
+
+def _git(*args: str, cwd: Path | None = None) -> str | None:
+    """Run a git command, returning stripped stdout or ``None`` on any failure."""
+    ok, value = _run_git(*args, cwd=cwd)
+    return value if ok and value else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,41 +76,62 @@ def git_context(root: Path | None = None) -> GitContext:
     )
 
 
-def default_base_ref() -> str | None:
+def default_base_ref(cwd: Path | None = None) -> str | None:
     """The ref to diff against, inferred from the CI environment.
 
     On GitHub Actions the merge-base ref is authoritative; locally ``origin/main``
     is a reasonable guess. An explicit ``--base`` always wins.
+
+    ``cwd`` selects the repository to probe for ``origin/<branch>``; without it the
+    search runs against the process working directory, which is not necessarily the
+    project being tested.
     """
     for env_var in ("AGENTCI_BASE", "GITHUB_BASE_REF"):
         value = os.environ.get(env_var)
         if value:
             return f"origin/{value}" if not value.startswith(("origin/", "refs/")) else value
     for branch in ("main", "master"):
-        if _git("rev-parse", "--verify", f"origin/{branch}"):
+        if _git("rev-parse", "--verify", f"origin/{branch}", cwd=cwd):
             return f"origin/{branch}"
     return None
 
 
-def changed_files(base: str | None = None, *, cwd: Path | None = None, head: str = "HEAD") -> list[str]:
-    """Files changed between ``base`` and ``head``, as repo-relative POSIX paths.
+def changed_files(base: str | None = None, *, cwd: Path | None = None, head: str = "HEAD") -> list[str] | None:
+    """Files changed since ``base``, as repo-relative POSIX paths.
 
-    Uses a three-dot diff so that a feature branch's changes are measured against
-    the point where it diverged, not against a moving branch tip.
+    The left-hand side is the merge base of ``base`` and ``head``, so a feature
+    branch's changes are measured from where it diverged rather than from a
+    ``main`` that has moved on. The right-hand side is the working tree, so
+    uncommitted edits count as changes too — on a CI checkout the two are
+    identical, but locally ``--changed`` must not report "nothing changed" while
+    the developer is mid-edit. Untracked, non-ignored files are included for the
+    same reason.
+
+    ``None`` means *the diff could not be determined*: no base ref, or git failed.
+    ``[]`` means the diff succeeded and nothing changed. Callers that decide which
+    tests to skip must not treat ``None`` as ``[]`` — that would silently reduce
+    coverage to zero.
     """
     root = cwd or Path.cwd()
-    target = base or default_base_ref()
+    target = base or default_base_ref(cwd=root)
     if target is None:
-        return []
+        return None
 
-    # Prefer the merge base; fall back to a two-dot diff for shallow clones and
-    # for the case where the base ref has advanced past the fork point.
-    output = _git("diff", "--name-only", f"{target}...{head}", cwd=root)
-    if output is None:
-        output = _git("diff", "--name-only", target, head, cwd=root)
-    if output is None:
-        return []
-    return [line for line in output.splitlines() if line.strip()]
+    ok, merge_base = _run_git("merge-base", target, head, cwd=root)
+    ref = merge_base if ok and merge_base else target
+
+    ok, output = _run_git("diff", "--name-only", ref, cwd=root)
+    if not ok:
+        return None
+    ok, untracked = _run_git("ls-files", "--others", "--exclude-standard", cwd=root)
+    if not ok:
+        return None
+
+    seen: dict[str, None] = {}
+    for line in (*output.splitlines(), *untracked.splitlines()):
+        if line.strip():
+            seen[line.strip()] = None
+    return list(seen)
 
 
 def is_ci() -> bool:

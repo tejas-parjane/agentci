@@ -40,6 +40,7 @@ from agentci.core.config import (
 )
 from agentci.core.result import Status
 from agentci.core.runner import RunOptions, TestRunner
+from agentci.core.selection import SelectionPlan, build_plan
 from agentci.errors import AgentCIError, ConfigError, ExitCode
 from agentci.reporting.models import RunReport
 from agentci.reporting.renderers import (
@@ -108,7 +109,16 @@ def _select(
     no_traces: bool,
     selected_by: str,
     selection_reason: str,
+    changed: bool = False,
+    base: str | None = None,
 ) -> tuple[list[AgentTestCase], RunOptions]:
+    # Resolved first so that an explicit --test-id / --name / --tag, which are more
+    # specific, overwrites the diff as the stated selection reason.
+    plan: SelectionPlan | None = build_plan(config, root, base=base) if changed else None
+    if plan is not None:
+        selected_by = "diff"
+        selection_reason = plan.base or plan.unresolved
+
     cases = discover(resolve_test_files(config, root), project_root=root)
     if test_ids:
         wanted = set(test_ids)
@@ -128,6 +138,7 @@ def _select(
         tags=tags,
         selected_by=selected_by,
         selection_reason=selection_reason,
+        selection=plan,
         record_traces=False if no_traces else None,
         fail_on_warn=fail_on_warn,
         root=root,
@@ -219,6 +230,16 @@ def run_command(
     test_id: list[str] = typer.Option([], "--test-id", help="Run only these test ids."),
     pattern: str | None = typer.Option(None, "--name", help="Substring match on test name or id."),
     repeat: int | None = typer.Option(None, "--repeat", min=1, help="Repeat every test N times."),
+    changed: bool = typer.Option(
+        False,
+        "--changed",
+        help="Run only tests affected by the diff against the base ref.",
+    ),
+    base_ref: str | None = typer.Option(
+        None,
+        "--base",
+        help="Ref to diff against with --changed. Defaults to AGENTCI_BASE, then origin/main.",
+    ),
     fail_on_warn: bool = typer.Option(False, "--fail-on-warn", help="Treat warnings as failures."),
     no_traces: bool = typer.Option(False, "--no-traces", help="Skip writing run artifacts."),
     json_out: bool = typer.Option(False, "--json", help="Print the JSON report to stdout."),
@@ -239,6 +260,8 @@ def run_command(
             no_traces=no_traces,
             selected_by="all",
             selection_reason="",
+            changed=changed,
+            base=base_ref,
         )
         if not cases:
             err_console.print("no tests selected")

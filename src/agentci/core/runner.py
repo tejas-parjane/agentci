@@ -81,6 +81,7 @@ from agentci.core.result import (
     Status,
     derive_metrics,
 )
+from agentci.core.selection import SelectionPlan
 from agentci.core.storage import RunStore
 from agentci.core.trace import EventType, Trace, TraceEvent, new_id, utc_now
 from agentci.errors import AgentCIError, DeadlineExceeded, StepLimitExceeded
@@ -195,6 +196,9 @@ class RunOptions:
     tags: list[str] = field(default_factory=list)
     selected_by: str = "all"
     selection_reason: str = ""
+    #: Set by ``--changed``. ``None`` means no diff-based selection was requested,
+    #: which is what keeps plain ``agentci run`` byte-for-byte unchanged.
+    selection: SelectionPlan | None = None
     record_traces: bool | None = None
     fail_on_warn: bool = False
     root: Path | None = None
@@ -268,11 +272,14 @@ class TestRunner:
     def run(self, cases: Sequence[AgentTestCase]) -> RunReport:
         """Execute every case and build the report."""
         repeat = self.options.repeat or self.config.evaluation.repeat
+        plan = self.options.selection
         report = RunReport(
             run=RunIdentity(
                 project=self.config.project.name,
                 selected_by=self.options.selected_by,
                 selection_reason=self.options.selection_reason,
+                selection_base=plan.base if plan is not None else None,
+                selection_changed=list(plan.changed) if plan is not None else [],
                 repeat=repeat,
                 minimum_pass_rate=self.config.evaluation.minimum_pass_rate,
             ),
@@ -281,13 +288,32 @@ class TestRunner:
         )
         report.run.run_ids = []
 
+        if plan is not None and plan.enabled and plan.unresolved:
+            self.warnings.append(
+                f"change-aware selection unavailable: {plan.unresolved}; "
+                "running every test"
+            )
+
+        skipped_by_selection = 0
         for case in cases:
             if not self._matches_tags(case):
                 report.tests.append(self._skipped(case, f"tag filter {self.options.tags}"))
                 continue
+            if plan is not None:
+                should_run, reason = plan.evaluate(case)
+                if not should_run:
+                    report.tests.append(self._skipped(case, reason))
+                    skipped_by_selection += 1
+                    continue
             report.tests.append(self._run_case(case, repeat))
             for iteration in report.tests[-1].iterations:
                 report.run.run_ids.append(iteration.run_id)
+
+        if skipped_by_selection:
+            self.warnings.append(
+                f"change-aware selection skipped {skipped_by_selection} of "
+                f"{len(cases)} test(s) against {plan.base if plan else 'the base ref'}"
+            )
 
         report.run.finished_at = utc_now()
         report.policy_violations = collect_violations(report)

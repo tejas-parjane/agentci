@@ -320,6 +320,10 @@ class RunIdentity(_Model):
     status: Status = Status.PASS
     selected_by: str = "all"
     selection_reason: str = ""
+    #: The ref the diff ran against, and the files it reported. Empty when no
+    #: change-aware selection was requested. Additive: absent from v0.1.0 reports.
+    selection_base: str | None = None
+    selection_changed: list[str] = Field(default_factory=list)
     repeat: int = 1
     minimum_pass_rate: float = 1.0
     run_ids: list[str] = Field(default_factory=list)

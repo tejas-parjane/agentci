@@ -1,0 +1,59 @@
+name: Feature request
+description: Something AgentCI should assert on, report, or refuse that it does not yet.
+labels: [feature]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - assertions
+        - adapters
+        - policy
+        - cli
+        - report
+        - regression / baselines
+        - evaluator
+        - mcp
+        - otel
+        - docs
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to assert or prevent?
+      description: The failure mode you cannot currently catch is more useful than the API you want.
+      placeholder: |
+        I cannot tell whether my agent asked for approval before calling a
+        destructive tool, only whether the call eventually succeeded.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like?
+      description: A sketch of the assertion, config key, or CLI behaviour.
+      placeholder: expect(result).to_require_approval_for("delete_ticket")
+
+  - type: checkboxes
+    id: contract
+    attributes:
+      label: Contract impact
+      description: Anything below that this would change needs an ADR before implementation.
+      options:
+        - label: Changes the report schema
+        - label: Changes `agentci.yaml`
+        - label: Changes exit codes or CLI output
+        - label: Changes the adapter interface
+        - label: Adds a dependency
+        - label: None of the above
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "I worked around it by..." — workarounds tell us what is missing.

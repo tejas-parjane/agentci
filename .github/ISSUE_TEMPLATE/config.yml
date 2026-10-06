@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/tejas-parjane/agentci/security/advisories/new
+    about: Report a leaked secret, policy bypass, or sandbox escape privately. Do not open a public issue.
+
+  - name: Question or discussion
+    url: https://github.com/tejas-parjane/agentci/discussions
+    about: How to write an assertion, configure policy, or debug a failing gate.
+
+  - name: Documentation
+    url: https://github.com/tejas-parjane/agentci/tree/main/docs
+    about: Configuration reference, adapter guide, and the decision records behind the design.

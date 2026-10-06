@@ -208,10 +208,23 @@ the package so consumers can pin the shape they parse.
 
 Not yet wired up:
 
-- Baseline comparison evaluates the stored baseline but does not yet gate on
-  quality/cost/latency deltas.
-- HTML report rendering and replay/mocked-HTTP fixtures.
+- HTML report rendering. `report.html` is a reserved option with no renderer
+  behind it.
+- Replay. The policy engine already accepts replay-supplied mocks, but nothing
+  produces them and there is no `agentci replay` command; `HttpAgentAdapter`
+  calls its endpoint for real.
 - PyPI publication (install from GitHub until then).
+
+## Documentation
+
+- [Configuration reference](docs/reference/configuration.md) — every key, its
+  default, and what it refuses to do.
+- [Writing an adapter](docs/guides/adapters.md) — the contract, tool
+  declaration, and reporting usage.
+- [Decision records](docs/adr/) — why the trace format, licence, redaction
+  boundary, and exit codes are what they are.
+- [Contributing](CONTRIBUTING.md), [Security policy](SECURITY.md),
+  [Changelog](CHANGELOG.md).
 
 ## Development
 
@@ -225,7 +238,8 @@ python scripts/verify.py   # example suite + negative-path probes
 
 `scripts/verify.py` runs seven probes that must **fail** — a credential leak, a
 step limit, a policy denial, and so on. A probe that passes is a regression in
-AgentCI itself.
+AgentCI itself. See [CONTRIBUTING.md](CONTRIBUTING.md) for what a change needs
+before it is ready for review.
 
 ## License
 

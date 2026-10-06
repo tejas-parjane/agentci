@@ -1,0 +1,80 @@
+name: AgentCI
+description: >-
+  Run the AgentCI agent test suite and fail the job when a gate, assertion, or
+  baseline regression blocks.
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  python-version:
+    description: >-
+      Python version to set up. Set to an empty string to use whatever
+      interpreter the job already provides.
+    default: "3.12"
+  source:
+    description: >-
+      What to `pip install`. Empty means this action's own checkout, so you do
+      not need a second checkout step. Set to a path to install a workspace
+      copy, or to `agentci-py==0.1.0` once the package is on PyPI.
+    default: ""
+  args:
+    description: Extra arguments appended to `agentci run`, e.g. `--tag smoke`.
+    default: ""
+  install:
+    description: Set to `false` if AgentCI is already installed in this job.
+    default: "true"
+  upload-reports:
+    description: Upload `.agentci/reports` as a build artifact, even on failure.
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact.
+    default: agentci-reports
+
+outputs:
+  report-dir:
+    description: Directory containing report.json and report.md.
+    value: ${{ steps.run.outputs.report-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: inputs.python-version != ''
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+
+    - name: Install AgentCI
+      if: inputs.install == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        source="${{ inputs.source }}"
+        if [ -z "$source" ]; then
+          # GITHUB_ACTION_PATH is this action's checkout, whose parent holds
+          # src/agentci. Installing from there keeps the action self-contained.
+          source="${GITHUB_ACTION_PATH}/.."
+        fi
+        python -m pip install --quiet "$source"
+
+    - name: Run the suite
+      id: run
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -f agentci.yaml ] && [ ! -f agentci.yml ]; then
+          echo "::error::No agentci.yaml in the workspace. Run \`agentci init\` and commit the result."
+          exit 2
+        fi
+        agentci run ${{ inputs.args }}
+        echo "report-dir=.agentci/reports" >> "$GITHUB_OUTPUT"
+
+    - name: Upload reports
+      if: always() && inputs.upload-reports == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: .agentci/reports/
+        if-no-files-found: ignore

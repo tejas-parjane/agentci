@@ -63,7 +63,7 @@ docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.25"]
 Homepage = "https://github.com/tejas-parjane/agentci"
 Repository = "https://github.com/tejas-parjane/agentci"
 Issues = "https://github.com/tejas-parjane/agentci/issues"
-Changelog = "https://github.com/tejas-parjane/agentci/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/tejas-parjane/agentci/blob/HEAD/CHANGELOG.md"
 
 [project.scripts]
 agentci = "agentci.cli:main"
@@ -138,8 +138,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # AgentCI is a test harness: it must be able to reference secrets, side effects
-# and bare asserts in fixtures without tripping its own linter. Its security
-# posture is enforced for real by tests/test_security.py, not by a lint rule.
+# and bare asserts in fixtures without tripping its own linter. The posture is
+# enforced for real instead -- tests/test_storage.py covers redaction and
+# path traversal, and scripts/verify.py asserts that its credential-leak probe
+# fails -- so no rule here needs to see a secret literal to know it is a secret.
 "tests/**" = ["S", "PLR", "ARG", "B011"]
 "examples/**" = ["S", "PLR", "ARG", "B011"]
 # B008: typer's entire CLI design is `option: type = typer.Option(default)`.

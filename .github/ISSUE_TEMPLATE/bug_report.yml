@@ -1,0 +1,82 @@
+name: Bug report
+description: AgentCI produced the wrong verdict, crashed, or leaked something.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A test harness bug is serious precisely because
+        it can turn a failure into a pass, so detail matters here.
+
+        **Vulnerabilities do not go here.** Use
+        [the private advisory channel](https://github.com/tejas-parjane/agentci/security/advisories/new)
+        instead — see SECURITY.md.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The behaviour you saw, including the verdict, status, and exit code.
+      placeholder: |
+        `agentci run` reported PASS 13/13, exit 0, but one test asserted
+        `to_use_tool("delete_ticket")` and the tool was never called.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: The test should have failed with an unmet tool assertion.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: |
+        The smallest `agentci.yaml` and test that shows it. If it involves the
+        example suite, say which test.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Relevant artifacts
+      description: |
+        Output, `report.json` excerpts, or a `trace.jsonl` line. **Redact
+        secrets first** — if redaction missed one, that is the bug and should be
+        reported as a vulnerability, not pasted here.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: agentci 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: exit-code
+    attributes:
+      label: Exit code observed
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - "3"
+        - "4"
+        - "5"
+        - "130"
+        - not sure
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, and CI provider if any.
+      placeholder: Windows 11, Python 3.13.5, GitHub Actions

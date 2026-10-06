@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  checks:
+    name: Gate the tag on a green suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check .
+      - run: mypy src
+      - run: python -m pytest
+      - run: python scripts/verify.py
+
+  build:
+    name: Build sdist and wheel
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    name: Publish the GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes="$(awk '/^## /{if (found) exit; found=1; next} found && NF' CHANGELOG.md || true)"
+          if [ -z "$notes" ]; then notes="See CHANGELOG.md."; fi
+          gh release create "$tag" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --notes "$notes"
+
+  # PyPI publication is deliberately deferred until the repository is public and
+  # the first tag has been verified by hand. To enable it: create a PyPI project
+  # named `agentci-py`, add a `PYPI_API_TOKEN` repository secret, uncomment the
+  # job below, and re-run the tag.
+  #
+  # pypi:
+  #   name: Publish to PyPI
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   environment: pypi
+  #   permissions:
+  #     id-token: write          # trusted publishing; no long-lived token
+  #   steps:
+  #     - uses: actions/download-artifact@v4
+  #       with:
+  #         name: dist
+  #         path: dist/
+  #     - uses: pypa/gh-action-pypi-publish@release/v1

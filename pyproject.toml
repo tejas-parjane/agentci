@@ -142,6 +142,11 @@ ignore = [
 # posture is enforced for real by tests/test_security.py, not by a lint rule.
 "tests/**" = ["S", "PLR", "ARG", "B011"]
 "examples/**" = ["S", "PLR", "ARG", "B011"]
+# B008: typer's entire CLI design is `option: type = typer.Option(default)`.
+# Refusing function-call defaults makes the declarative command signatures
+# impossible to write. PLR0917: a command with that many options cannot also
+# keep its positional argument count under five without becoming unreadable.
+"src/agentci/cli.py" = ["B008", "PLR0917"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["agentci"]

@@ -83,6 +83,12 @@ policy in `agentci.yaml`.
   (release-strict), because a release the harness cannot scope to a diff is
   unverifiable.
 
+Skips are not warnings. A test the diff proves unaffected is the *point* of
+selection, so `unmatched: skip` never blocks `gate` by itself: the skip count
+(`run.selection_skipped`) and each skipped test's reason stay in the report, and
+the gate only blocks on warnings that mean something went wrong — not on
+coverage it requested.
+
 A blocked gate prints the verdict *with the reasons*:
 
 ```text

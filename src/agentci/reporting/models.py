@@ -324,6 +324,10 @@ class RunIdentity(_Model):
     #: change-aware selection was requested. Additive: absent from v0.1.0 reports.
     selection_base: str | None = None
     selection_changed: list[str] = Field(default_factory=list)
+    #: Tests the change analysis skipped. Informational, not a warning: the diff
+    #: says they are unaffected, which is the point of selection. Each one also
+    #: carries its own reason in its report entry. Additive, absent from v0.1.0.
+    selection_skipped: int = 0
     repeat: int = 1
     minimum_pass_rate: float = 1.0
     run_ids: list[str] = Field(default_factory=list)

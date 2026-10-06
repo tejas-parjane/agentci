@@ -171,6 +171,28 @@ def test_warnings_block_unless_allowed() -> None:
     assert _gate_reasons(report, None, allow_warn=True) == []
 
 
+def test_selection_skips_alone_do_not_block() -> None:
+    """The case the release gate must not punish: skips by change analysis."""
+    plan = SelectionPlan(enabled=True, base="origin/main", unmatched="skip")
+    report = _report()
+    report.run.selection_skipped = 3
+
+    assert _gate_reasons(report, plan, allow_warn=False) == []
+
+
+def test_selection_skips_do_not_mask_a_real_warning() -> None:
+    """Skips being informational must not hide a run-level warning either."""
+    plan = SelectionPlan(enabled=True, base="origin/main", unmatched="skip")
+    report = _report()
+    report.run.selection_skipped = 3
+    report.warnings = ["could not record run artifacts"]
+
+    assert _gate_reasons(report, plan, allow_warn=False) == [
+        "could not record run artifacts"
+    ]
+    assert _gate_reasons(report, plan, allow_warn=True) == []
+
+
 def test_the_selection_warning_is_not_listed_twice() -> None:
     """_render_terminal already prints it, and the plan reason outranks it."""
     report = _report()
@@ -257,16 +279,34 @@ def test_gate_blocks_on_a_failing_test(tmp_path: Path) -> None:
     assert "the run failed" in out
 
 
-def test_gate_blocks_on_a_warning_and_allow_warn_lifts_it(tmp_path: Path) -> None:
+def test_gate_passes_when_selection_skips_everything(tmp_path: Path) -> None:
+    """unmatched: skip + a clean diff must not block the release by itself.
+
+    A skip means the change analysis proved the test unaffected — that is what
+    selection is *for*, and blocking on it would make `unmatched: skip` (the
+    strategy a large suite needs) unusable inside a gate.
+    """
     root = _project(tmp_path, unmatched="skip")
+    code, out = _gate(root)
 
-    blocked, blocked_out = _gate(root)
-    assert blocked == 1
-    assert "RELEASE GATE: BLOCKED" in blocked_out
+    assert code == 0
+    assert "RELEASE GATE: PASS" in out
+    # Coverage stays visible: the gate says *what* it skipped, in plain text.
+    assert "change-aware selection skipped 1 of 1 test(s) against HEAD" in out
 
-    allowed, allowed_out = _gate(root, "--allow-warn")
-    assert allowed == 0
-    assert "RELEASE GATE: PASS" in allowed_out
+
+def test_selection_skips_are_informational_in_the_report(tmp_path: Path) -> None:
+    """The skip is a `selection_skipped` count, not a warning."""
+    root = _project(tmp_path, unmatched="skip")
+    code, out = _gate(root, "--json")
+
+    assert code == 0
+    report = json.loads(out)
+    assert report["run"]["selection_base"] == "HEAD"
+    assert report["run"]["selection_skipped"] == 1
+    assert report["warnings"] == []
+    # The reason lives on the skipped test itself, so a skipped run is auditable.
+    assert "no change to" in report["tests"][0]["error"]
 
 
 def test_run_without_changed_records_no_diff(tmp_path: Path) -> None:

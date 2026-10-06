@@ -42,6 +42,12 @@ parse `report.json` should pin `schema_version`, not the release.
   `refund_decision`, read-only `lookup_customer`/`lookup_order` tools, and mocked
   `refund_order`/`send_email` side effects, with `lookup_customer`, `lookup_order`,
   `refund_order`, and `send_email` added to the allowlist.
+- Change-aware selection skips are now an **informational outcome**, not
+  warnings. The report records them as `run.selection_skipped` (with the reason
+  on each skipped test), so `agentci gate` passes on `unmatched: skip` — a
+  release must not block because the diff proved unaffected tests were skipped.
+  Warnings that mean "something went wrong" (an unresolvable base, a persistence
+  fault) still block as before.
 
 ## [0.1.0] - 2026-10-06
 

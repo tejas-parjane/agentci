@@ -205,6 +205,14 @@ def _render_terminal(report: RunReport, *, quiet: bool) -> None:
         f"{summary.failed} failed, {summary.errored} errored, "
         f"{summary.skipped} skipped"
     )
+    # Coverage is worth stating even when it passes; a skipped-by-selection count
+    # is informational, so it gets a line of its own instead of a warning colour.
+    if report.run.selection_skipped:
+        console.print(
+            f"  change-aware selection skipped {report.run.selection_skipped} of "
+            f"{summary.total} test(s) against "
+            f"{report.run.selection_base or 'the base ref'}"
+        )
     for warning in report.warnings:
         Console(style="yellow").print(f"  warning: {warning}")
 

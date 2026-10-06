@@ -270,6 +270,11 @@ def render_markdown(
         f"{summary.assertions_failed} failed, {summary.assertions_skipped} skipped |",
         f"| Policy violations | {summary.policy_violations} |",
     ]
+    if report.run.selection_skipped:
+        lines.append(
+            f"| Selection skip | {report.run.selection_skipped} of {summary.total} tests "
+            f"against `{report.run.selection_base or 'the base ref'}` |"
+        )
 
     lines += ["", "## Tests", "", *_tests_table(report)]
 

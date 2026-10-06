@@ -232,13 +232,17 @@ running more tests rather than fewer:
 - A change to any `global_paths` entry runs everything.
 
 Skips are never silent: each one records `no change to <patterns> since <base>`
-in the report, and the run warns `change-aware selection skipped N of M test(s)`.
+as the reason on the test itself, and the run's report carries a
+`run.selection_skipped` count (printed as an informational line, not a warning).
+A skipped set is the point of selection — the change analysis says the tests are
+unaffected — so `agentci gate` does **not** block on it.
 
-`agentci gate` treats those warnings as blocking (pass `--allow-warn` to relax
-them) and blocks outright on an unresolvable base, which `--allow-warn` does not
-lift — see [ADR-0009](../adr/0009-change-aware-selection.md). Set
-`enabled: false` to turn selection off entirely; both commands then run the full
-suite.
+Warnings that genuinely block are the ones that mean "something about the run
+itself went wrong": an unresolvable base, a persistence failure, and so on.
+`agentci gate` treats those as blocking (pass `--allow-warn` to relax them) and
+blocks outright on an unresolvable base, which `--allow-warn` does not lift — see
+[ADR-0009](../adr/0009-change-aware-selection.md). Set `enabled: false` to turn
+selection off entirely; both commands then run the full suite.
 
 ---
 

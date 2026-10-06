@@ -401,7 +401,11 @@ def test_skipped_tests_reach_the_report_with_a_reason(tmp_path: Path) -> None:
     assert "prompts/refund.txt" in (report.tests[0].error or "")
     assert "origin/main" in (report.tests[0].error or "")
     assert report.summary.skipped == 2
-    assert any("skipped 2 of 2" in warning for warning in report.warnings)
+    # Skips are informational, not warnings: `selection_skipped` records them and
+    # each test carries its reason, so a skipped set is visible and auditable
+    # without being mistaken for a run-level problem.
+    assert report.run.selection_skipped == 2
+    assert report.warnings == []
 
 
 def test_a_matched_dependency_still_runs(tmp_path: Path) -> None:

@@ -58,6 +58,7 @@ sides are identical; locally the difference is the whole question.
 | Condition | `agentci run --changed` | `agentci gate` |
 | --- | --- | --- |
 | Base unresolved | warning, full suite runs | **BLOCK** |
+| Selection skips | informational: `run.selection_skipped` + reason per test | informational, does **not** block |
 | Run warnings | ignored | **BLOCK** (`--allow-warn` relaxes) |
 | Selection disabled | full suite | full suite |
 
@@ -66,6 +67,16 @@ to ship, non-zero to stop, with every reason printed under
 `RELEASE GATE: BLOCKED`. `--allow-warn` lifts warnings only; an unverifiable
 release stays unverifiable, so it is never lifted by a display preference.
 
+**Selection skips are not warnings.** A skipped set means the change analysis
+determined the tests are unaffected — that is the point of selection, not a sign
+of a broken run. Blocking a release because it skipped the tests it could not
+scope to would make `unmatched: skip` (the strategy large suites need) unusable
+with `gate`. The distinction the table draws: *"I intentionally skipped tests
+because the diff cannot affect them"* is not the same risk as *"something went
+wrong while determining what to test."* The first is a statement about coverage
+and stays visible as `run.selection_skipped` and a per-test reason; the second
+is a base ref that cannot be resolved, and it blocks.
+
 ## Consequences
 
 - Safety is a property of the *engine*, not the operator. A wrong base produces
@@ -73,9 +84,10 @@ release stays unverifiable, so it is never lifted by a display preference.
   resolved diff plus an explicit `unmatched: skip`.
 - Selection costs a handful of `git` calls per invocation and no test
   execution, so the fast path is cheap enough to leave on.
-- `report.json` gains `run.selection_base` and `run.selection_changed` as
-  additive defaulted fields. `schema_version` stays 1: consumers reading old
-  reports see `null`/`[]`, and no existing field changes meaning.
+- `report.json` gains `run.selection_base`, `run.selection_changed`, and
+  `run.selection_skipped` as additive defaulted fields. `schema_version` stays 1:
+  consumers reading old reports see `null`/`[]`/`0`, and no existing field
+  changes meaning.
 - Every skipped test records its reason in `test.error`, so a skipped run is
   auditable rather than merely quiet.
 - `selection.enabled: false` is honoured by both commands and means "always run

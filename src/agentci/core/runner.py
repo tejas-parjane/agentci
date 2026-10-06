@@ -310,10 +310,13 @@ class TestRunner:
                 report.run.run_ids.append(iteration.run_id)
 
         if skipped_by_selection:
-            self.warnings.append(
-                f"change-aware selection skipped {skipped_by_selection} of "
-                f"{len(cases)} test(s) against {plan.base if plan else 'the base ref'}"
-            )
+            # Informational, and deliberately *not* a warning: the change analysis
+            # says these tests are unaffected, which is what selection is for. A
+            # release gate must not block because tests it could not scoped were
+            # skipped -- that is the crux of the decision. Unresolved bases stay
+            # warnings (above); a diff that cannot be known must not be treated as
+            # an empty one.
+            report.run.selection_skipped = skipped_by_selection
 
         report.run.finished_at = utc_now()
         report.policy_violations = collect_violations(report)

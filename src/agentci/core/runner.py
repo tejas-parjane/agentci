@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +56,7 @@ from agentci.assertions import execution as budget_assertions
 from agentci.assertions import leaks as leak_assertions
 from agentci.assertions.base import AssertionCollector, AssertionFailed, Kind
 from agentci.assertions.fluent import activate, deactivate
-from agentci.core.config import Config
+from agentci.core.config import Config, RegressionConfig
 from agentci.core.context import RunContext
 from agentci.core.cost import CostEstimator, build_cost_model
 from agentci.core.env import ci_provider, git_context, is_ci
@@ -81,12 +83,14 @@ from agentci.reporting.models import (
     GateResult,
     IterationReport,
     PlatformInfo,
+    RegressionSection,
     RunIdentity,
     RunReport,
     RunSummary,
     TestReport,
     TraceExcerpt,
 )
+from agentci.reporting.renderers import render_json, render_markdown
 from agentci.testing import AgentTestCase
 
 #: Events describing the invocation rather than the agent's reasoning. Always
@@ -94,6 +98,85 @@ from agentci.testing import AgentTestCase
 LIFECYCLE_EVENTS = frozenset(
     {EventType.RUN_STARTED, EventType.RUN_COMPLETED, EventType.ERROR}
 )
+
+
+def _run_id_of(run_meta: Any) -> str | None:
+    if isinstance(run_meta, dict):
+        value = run_meta.get("id")
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _started_at_of(run_meta: Any) -> datetime | None:
+    if not isinstance(run_meta, dict):
+        return None
+    value = run_meta.get("started_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _relative_gate(
+    *,
+    name: str,
+    label: str,
+    limit: float,
+    ignore_below: float,
+    before: float,
+    after: float,
+) -> GateResult:
+    """Compare a magnitude against its baseline as a percentage change.
+
+    Two guards keep this honest. A zero baseline makes the ratio undefined, which
+    is ``SKIP`` rather than a zero-percent pass; and a change within ``ignore_below``
+    passes with the reason stated, so noise from a near-zero baseline cannot
+    build-block anyone.
+    """
+    threshold = f"<= {limit}%"
+    if before <= 0:
+        return GateResult(
+            name=name,
+            status=Status.SKIP,
+            threshold=threshold,
+            message=f"baseline {label} is zero, so a relative change is undefined",
+            source="regression",
+        )
+    change = (after - before) / before * 100.0
+    if change <= 0:
+        return GateResult(
+            name=name,
+            status=Status.PASS,
+            actual=round(change, 2),
+            threshold=threshold,
+            message=f"{label} improved {change:+.1f}%",
+            source="regression",
+        )
+    if change <= ignore_below:
+        return GateResult(
+            name=name,
+            status=Status.PASS,
+            actual=round(change, 2),
+            threshold=threshold,
+            message=(
+                f"{label} rose {change:.1f}%, within the {ignore_below}% noise floor"
+            ),
+            source="regression",
+        )
+    return GateResult(
+        name=name,
+        status=Status.PASS if change <= limit else Status.FAIL,
+        actual=round(change, 2),
+        threshold=threshold,
+        message=(
+            f"{label} rose {change:.1f}% (baseline {before:.4f} -> {after:.4f})"
+            if change > limit
+            else ""
+        ),
+        source="regression",
+    )
 
 
 class AgentHandle:
@@ -264,8 +347,50 @@ class TestRunner:
         report.dimensions = self._dimensions(report)
         report.gates = self._absolute_gates(report)
         report.warnings = list(self.warnings)
+        report.regression = self._compare_baseline(report)
         report.run.status = self._overall_status(report)
+        self._persist_report(report)
         return report
+
+    def _persist_report(self, report: RunReport) -> None:
+        """Write report.json / report.md when artifact persistence is enabled.
+
+        Kept separate from ``_persist`` because traces are per-iteration evidence
+        while this is the run's verdict -- they are written on different schedules
+        and a consumer may want one without the other.
+
+        Failures here are warnings, not exceptions: losing an artifact degrades the
+        report but must not change a verdict that CI has already decided on.
+        """
+        record = (
+            self.config.storage.record_traces
+            if self.options.record_traces is None
+            else self.options.record_traces
+        )
+        if not record:
+            return
+
+        report_json = (
+            render_json(report, redactor=self.redactor)
+            if self.config.report.json_enabled
+            else None
+        )
+        report_md = (
+            render_markdown(report, redactor=self.redactor)
+            if self.config.report.markdown
+            else None
+        )
+        if report_json is None and report_md is None:
+            return
+        try:
+            self.store.save_report(report.run.id, report_json or "", report_md)
+        except OSError as exc:
+            # Appended to the report as well as the runner's own list: the report
+            # was rendered before this failed, so the artifact cannot carry the
+            # warning about itself, but the caller and the console still must.
+            message = f"could not write report artifacts: {exc}"
+            self.warnings.append(message)
+            report.warnings.append(message)
 
     # -- one test -------------------------------------------------------------
 
@@ -788,15 +913,186 @@ class TestRunner:
     def _collect_violations(self, report: RunReport) -> list[PolicyViolation]:
         return _dedupe_violations([v for test in report.tests for v in test.policy_violations])
 
+    # -- baseline comparison (FR-5, 19) --------------------------------------
+
+    def _compare_baseline(self, report: RunReport) -> RegressionSection:
+        """Compare this run against the stored baseline.
+
+        Called unconditionally so that an absent or unreadable baseline comes back
+        as ``SKIP`` with a reason attached -- never ``PASS``. An unevaluated
+        regression check is an unknown, and 19 forbids rendering an unknown as a
+        pass.
+
+        Tests in the baseline but missing from this run are reported in
+        ``missing_from_run`` without gating: ``--tag`` and ``--name`` selection drop
+        tests legitimately, and gating on selection would make filtering unusable.
+        """
+        cfg = self.config.regression
+        baseline_path = self.root / cfg.baseline
+        if not baseline_path.is_file():
+            return RegressionSection.not_compared(
+                f"no baseline at {baseline_path}; run `agentci baseline save` to record one"
+            )
+
+        try:
+            payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+            raw_tests = payload["tests"]
+            run_meta = payload.get("run")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            message = (
+                f"baseline {baseline_path} could not be read ({exc}); "
+                "re-run `agentci baseline save`"
+            )
+            report.warnings.append(message)
+            return RegressionSection.not_compared(f"baseline unreadable: {exc}")
+        if not isinstance(raw_tests, dict):
+            report.warnings.append(f"baseline {baseline_path} has no `tests` mapping")
+            return RegressionSection.not_compared("baseline has no tests mapping")
+
+        baseline: dict[str, Any] = raw_tests
+        current = {t.test_id: t for t in report.tests}
+        shared = [tid for tid in baseline if tid in current]
+
+        def _baseline_passing(entry: Any) -> bool:
+            if not isinstance(entry, dict):
+                return False
+            return entry.get("status") in {Status.PASS.value, Status.WARN.value}
+
+        new_failures = [
+            tid
+            for tid in shared
+            if _baseline_passing(baseline[tid])
+            and current[tid].status in {Status.FAIL, Status.ERROR}
+        ]
+        fixed = [
+            tid
+            for tid in shared
+            if not _baseline_passing(baseline[tid])
+            and current[tid].status in {Status.PASS, Status.WARN}
+        ]
+        missing = [tid for tid in baseline if tid not in current]
+
+        comparisons = self._regression_gates(cfg, baseline, current, shared)
+        if cfg.fail_on_new_test_failures:
+            comparisons.append(
+                GateResult(
+                    name="regression.new_failures",
+                    status=Status.FAIL if new_failures else Status.PASS,
+                    actual=float(len(new_failures)),
+                    threshold="0",
+                    message=(
+                        ""
+                        if not new_failures
+                        else f"{len(new_failures)} test(s) passed in the baseline "
+                        f"and fail now: {', '.join(sorted(new_failures))}"
+                    ),
+                    source="regression",
+                )
+            )
+
+        blocked = [g for g in comparisons if g.status is Status.FAIL]
+        if not shared:
+            status = Status.SKIP
+            message = "no baseline tests are present in this run to compare against"
+        elif blocked:
+            status = Status.FAIL if cfg.on_regression == "fail" else Status.WARN
+            message = "; ".join(g.message for g in blocked if g.message)
+        else:
+            status = Status.PASS
+            message = f"compared {len(shared)} test(s) against the baseline"
+
+        return RegressionSection(
+            compared=True,
+            baseline_run_id=_run_id_of(run_meta),
+            baseline_created_at=_started_at_of(run_meta),
+            status=status,
+            comparisons=comparisons,
+            new_failures=sorted(new_failures),
+            fixed=sorted(fixed),
+            missing_from_run=sorted(missing),
+            message=message,
+        )
+
+    @staticmethod
+    def _regression_gates(
+        cfg: RegressionConfig,
+        baseline: dict[str, Any],
+        current: dict[str, TestReport],
+        shared: list[str],
+    ) -> list[GateResult]:
+        """Evaluate the configured relative gates over tests both runs share."""
+        gates: list[GateResult] = []
+
+        if cfg.max_quality_drop is not None and shared:
+            before = [float(baseline[tid].get("score") or 0.0) for tid in shared]
+            after = [current[tid].score() for tid in shared]
+            if all(value is not None for value in after):
+                baseline_quality = sum(before) / len(before)
+                current_quality = sum(value for value in after if value is not None) / len(after)
+                drop = baseline_quality - current_quality
+                ok = drop <= cfg.max_quality_drop
+                gates.append(
+                    GateResult(
+                        name="regression.quality_drop",
+                        status=Status.PASS if ok else Status.FAIL,
+                        actual=round(drop, 4),
+                        threshold=f"<= {cfg.max_quality_drop}",
+                        message=(
+                            ""
+                            if ok
+                            else f"quality dropped {drop:.3f}: "
+                            f"{baseline_quality:.3f} -> {current_quality:.3f}"
+                        ),
+                        source="regression",
+                    )
+                )
+
+        if cfg.max_cost_increase_pct is not None and shared:
+            gates.append(
+                _relative_gate(
+                    name="regression.cost_increase",
+                    label="cost",
+                    limit=cfg.max_cost_increase_pct,
+                    ignore_below=cfg.ignore_regression_below_pct,
+                    before=sum(float(baseline[tid].get("cost_usd") or 0.0) for tid in shared),
+                    after=sum(current[tid].cost_usd or 0.0 for tid in shared),
+                )
+            )
+
+        if cfg.max_latency_increase_pct is not None and shared:
+            gates.append(
+                _relative_gate(
+                    name="regression.latency_increase",
+                    label="latency",
+                    limit=cfg.max_latency_increase_pct,
+                    ignore_below=cfg.ignore_regression_below_pct,
+                    before=sum(float(baseline[tid].get("duration_ms") or 0.0) for tid in shared),
+                    after=sum(current[tid].duration_ms or 0.0 for tid in shared),
+                )
+            )
+
+        return gates
+
     def _overall_status(self, report: RunReport) -> Status:
-        if report.summary.errored or any(g.status is Status.FAIL for g in report.gates):
+        """Fold every dimension into one verdict, worst first.
+
+        ``ERROR`` outranks ``FAIL`` deliberately (§32). When a test's infrastructure
+        faulted, that is the thing a maintainer fixes first, and reporting the run
+        as a mere quality failure would bury it behind assertion noise.
+        """
+        if not report.tests:
+            return Status.SKIP
+        if report.summary.errored:
+            return Status.ERROR
+        if any(g.status is Status.FAIL for g in report.gates):
             return Status.FAIL
         if report.regression.status is Status.FAIL:
             return Status.FAIL
         if report.regression.status is Status.WARN or report.summary.warned:
-            return Status.WARN
-        if not report.tests:
-            return Status.SKIP
+            # ``--fail-on-warn`` is a gate policy, so it changes the verdict rather
+            # than only the exit code -- otherwise an artifact would claim WARN
+            # while CI reports the same run as failed.
+            return Status.FAIL if self.options.fail_on_warn else Status.WARN
         return Status.PASS
 
     # -- misc -----------------------------------------------------------------

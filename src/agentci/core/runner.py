@@ -54,12 +54,22 @@ from agentci.adapters.python import (
 )
 from agentci.assertions import execution as budget_assertions
 from agentci.assertions import leaks as leak_assertions
-from agentci.assertions.base import AssertionCollector, AssertionFailed, Kind
+from agentci.assertions.base import AssertionCollector, AssertionFailed
 from agentci.assertions.fluent import activate, deactivate
-from agentci.core.config import Config, RegressionConfig
+from agentci.core.config import Config
 from agentci.core.context import RunContext
 from agentci.core.cost import CostEstimator, build_cost_model
 from agentci.core.env import ci_provider, git_context, is_ci
+from agentci.core.postprocess import (
+    absolute_gates,
+    blocking,
+    collect_violations,
+    dedupe_violations,
+    dimensions,
+    overall_status,
+    regression_gates,
+    summarize,
+)
 from agentci.core.recorder import TraceRecorder
 from agentci.core.redaction import DEFAULT_PATTERNS, Redactor
 from agentci.core.result import (
@@ -74,10 +84,9 @@ from agentci.core.result import (
 from agentci.core.storage import RunStore
 from agentci.core.trace import EventType, Trace, TraceEvent, new_id, utc_now
 from agentci.errors import AgentCIError, DeadlineExceeded, StepLimitExceeded
-from agentci.policy.engine import PolicyEngine, compliance
+from agentci.policy.engine import PolicyEngine
 from agentci.reporting.models import (
     AssertionReport,
-    DimensionsReport,
     EnvironmentReport,
     Flakiness,
     GateResult,
@@ -86,7 +95,6 @@ from agentci.reporting.models import (
     RegressionSection,
     RunIdentity,
     RunReport,
-    RunSummary,
     TestReport,
     TraceExcerpt,
 )
@@ -117,66 +125,6 @@ def _started_at_of(run_meta: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _relative_gate(
-    *,
-    name: str,
-    label: str,
-    limit: float,
-    ignore_below: float,
-    before: float,
-    after: float,
-) -> GateResult:
-    """Compare a magnitude against its baseline as a percentage change.
-
-    Two guards keep this honest. A zero baseline makes the ratio undefined, which
-    is ``SKIP`` rather than a zero-percent pass; and a change within ``ignore_below``
-    passes with the reason stated, so noise from a near-zero baseline cannot
-    build-block anyone.
-    """
-    threshold = f"<= {limit}%"
-    if before <= 0:
-        return GateResult(
-            name=name,
-            status=Status.SKIP,
-            threshold=threshold,
-            message=f"baseline {label} is zero, so a relative change is undefined",
-            source="regression",
-        )
-    change = (after - before) / before * 100.0
-    if change <= 0:
-        return GateResult(
-            name=name,
-            status=Status.PASS,
-            actual=round(change, 2),
-            threshold=threshold,
-            message=f"{label} improved {change:+.1f}%",
-            source="regression",
-        )
-    if change <= ignore_below:
-        return GateResult(
-            name=name,
-            status=Status.PASS,
-            actual=round(change, 2),
-            threshold=threshold,
-            message=(
-                f"{label} rose {change:.1f}%, within the {ignore_below}% noise floor"
-            ),
-            source="regression",
-        )
-    return GateResult(
-        name=name,
-        status=Status.PASS if change <= limit else Status.FAIL,
-        actual=round(change, 2),
-        threshold=threshold,
-        message=(
-            f"{label} rose {change:.1f}% (baseline {before:.4f} -> {after:.4f})"
-            if change > limit
-            else ""
-        ),
-        source="regression",
-    )
 
 
 class AgentHandle:
@@ -342,13 +290,13 @@ class TestRunner:
                 report.run.run_ids.append(iteration.run_id)
 
         report.run.finished_at = utc_now()
-        report.policy_violations = self._collect_violations(report)
-        report.summary = self._summarize(report)
-        report.dimensions = self._dimensions(report)
-        report.gates = self._absolute_gates(report)
+        report.policy_violations = collect_violations(report)
+        report.summary = summarize(report)
+        report.dimensions = dimensions(report, self.config)
+        report.gates = absolute_gates(report, self.config)
         report.warnings = list(self.warnings)
         report.regression = self._compare_baseline(report)
-        report.run.status = self._overall_status(report)
+        report.run.status = overall_status(report, self.options.fail_on_warn)
         self._persist_report(report)
         return report
 
@@ -434,11 +382,11 @@ class TestRunner:
             dependencies=list(case.dependencies),
             iterations=iterations,
             assertions=[AssertionReport.from_result(a) for a in assertions],
-            policy_violations=_dedupe_violations(violations),
+            policy_violations=dedupe_violations(violations),
             output_excerpt=last_view.repr_excerpt() if last_view else "",
         )
         test.status, test.flakiness = self._test_status(
-            iterations, len(_blocking(violations)), case.minimum_pass_rate
+            iterations, len(blocking(violations)), case.minimum_pass_rate
         )
         if error and test.status is not Status.PASS:
             test.error = error
@@ -752,167 +700,6 @@ class TestRunner:
         except ValueError:  # pragma: no cover
             return stored.trace_path.as_posix()
 
-    # -- aggregation ----------------------------------------------------------
-
-    def _summarize(self, report: RunReport) -> RunSummary:
-        tests = report.tests
-        executed = [t for t in tests if t.status is not Status.SKIP]
-        costs = [t.cost_usd for t in tests if t.cost_usd is not None]
-        tokens = [t.total_tokens for t in tests if t.total_tokens is not None]
-
-        return RunSummary(
-            total=len(tests),
-            passed=sum(1 for t in tests if t.status is Status.PASS),
-            failed=sum(1 for t in tests if t.status is Status.FAIL),
-            warned=sum(1 for t in tests if t.status is Status.WARN),
-            errored=sum(1 for t in tests if t.status is Status.ERROR),
-            skipped=sum(1 for t in tests if t.status is Status.SKIP),
-            flaky=sum(1 for t in tests if t.flakiness is Flakiness.FLAKY),
-            pass_rate=(
-                sum(1 for t in executed if t.status is Status.PASS) / len(executed)
-                if executed
-                else 0.0
-            ),
-            duration_ms=sum(t.duration_ms for t in tests),
-            cost_usd=sum(costs) if costs else None,
-            total_tokens=sum(tokens) if tokens else None,
-            assertions_passed=sum(1 for t in tests for a in t.assertions if a.ok),
-            assertions_failed=sum(len(t.failures) for t in tests),
-            assertions_skipped=sum(len(t.skipped_assertions) for t in tests),
-            policy_violations=len(_blocking(report.policy_violations)),
-        )
-
-    def _dimensions(self, report: RunReport) -> DimensionsReport:
-        """Dimension scores over every evaluated assertion (PRD §18).
-
-        Deliberately not collapsed into a composite: each dimension is
-        independently gateable, so a policy violation cannot be averaged away by a
-        good task score.
-        """
-        executed = [t for t in report.tests if t.status is not Status.SKIP]
-        blocking = _blocking(report.policy_violations)
-        if not executed:
-            return DimensionsReport(policy_compliance=compliance(blocking))
-
-        behavioural = [a for t in executed for a in t.assertions]
-        tool_assertions = [a for a in behavioural if a.kind == Kind.TOOL.value]
-
-        def rate(assertions: list[AssertionReport]) -> float | None:
-            evaluated = [a for a in assertions if a.status.value != "skipped"]
-            if not evaluated:
-                return None
-            return sum(1 for a in evaluated if a.ok) / len(evaluated)
-
-        latencies = [t.duration_ms for t in executed if t.duration_ms > 0]
-        costs = [t.cost_usd for t in executed if t.cost_usd is not None]
-        budget = self.config.budgets.max_cost_usd
-
-        cost_efficiency: float | None = None
-        if costs and budget:
-            cost_efficiency = sum(min(1.0, budget / c) if c > 0 else 1.0 for c in costs) / len(
-                costs
-            )
-
-        return DimensionsReport(
-            task_success=rate(behavioural),
-            tool_correctness=rate(tool_assertions),
-            policy_compliance=compliance(blocking),
-            reliability=sum(1 for t in executed if t.status is Status.PASS) / len(executed),
-            cost_efficiency=cost_efficiency,
-            latency_ms=(sum(latencies) / len(latencies)) if latencies else None,
-        )
-
-    def _absolute_gates(self, report: RunReport) -> list[GateResult]:
-        """Evaluate configured dimension gates (§18) plus absolute blocks.
-
-        Absolute blocks come second but matter equally: a failing test or an
-        infrastructure error always blocks, whether or not a dimension threshold
-        happened to notice it.
-        """
-        gates: list[GateResult] = []
-        summary = report.summary
-        dimensions = report.dimensions
-
-        values: dict[str, float | None] = {
-            "task_success": dimensions.task_success,
-            "tool_correctness": dimensions.tool_correctness,
-            "policy_compliance": dimensions.policy_compliance,
-            "reliability": dimensions.reliability,
-            "max_cost_usd": summary.cost_usd,
-            "max_latency_ms": (
-                max((t.duration_ms for t in report.tests), default=0.0) or None
-            ),
-            "max_tokens": float(summary.total_tokens) if summary.total_tokens else None,
-        }
-
-        for name, threshold in self.config.gates.active().items():
-            actual = values.get(name)
-            if actual is None:
-                gates.append(
-                    GateResult(
-                        name=name,
-                        status=Status.SKIP,
-                        threshold=threshold.target,
-                        message="no data to evaluate this gate",
-                        source="gate",
-                    )
-                )
-                continue
-            ok = threshold.evaluate(actual)
-            gates.append(
-                GateResult(
-                    name=name,
-                    status=Status.PASS if ok else Status.FAIL,
-                    actual=actual,
-                    threshold=threshold.target,
-                    message=""
-                    if ok
-                    else f"{name} gate failed ({threshold.describe(actual)})",
-                    source="gate",
-                )
-            )
-
-        if summary.failed:
-            gates.append(
-                GateResult(
-                    name="tests",
-                    status=Status.FAIL,
-                    actual=float(summary.failed),
-                    threshold="0 failing",
-                    message=f"{summary.failed} test(s) failed",
-                    source="absolute",
-                )
-            )
-        if summary.errored:
-            gates.append(
-                GateResult(
-                    name="errors",
-                    status=Status.FAIL,
-                    actual=float(summary.errored),
-                    threshold="0 errors",
-                    message=(
-                        f"{summary.errored} test(s) ended in ERROR; an infrastructure fault "
-                        f"is never reported as a pass"
-                    ),
-                    source="absolute",
-                )
-            )
-        if summary.policy_violations:
-            gates.append(
-                GateResult(
-                    name="policy",
-                    status=Status.FAIL,
-                    actual=float(summary.policy_violations),
-                    threshold="0 violations",
-                    message=f"{summary.policy_violations} policy violation(s)",
-                    source="policy",
-                )
-            )
-        return gates
-
-    def _collect_violations(self, report: RunReport) -> list[PolicyViolation]:
-        return _dedupe_violations([v for test in report.tests for v in test.policy_violations])
-
     # -- baseline comparison (FR-5, 19) --------------------------------------
 
     def _compare_baseline(self, report: RunReport) -> RegressionSection:
@@ -972,7 +759,7 @@ class TestRunner:
         ]
         missing = [tid for tid in baseline if tid not in current]
 
-        comparisons = self._regression_gates(cfg, baseline, current, shared)
+        comparisons = regression_gates(cfg, baseline, current, shared)
         if cfg.fail_on_new_test_failures:
             comparisons.append(
                 GateResult(
@@ -1012,88 +799,6 @@ class TestRunner:
             missing_from_run=sorted(missing),
             message=message,
         )
-
-    @staticmethod
-    def _regression_gates(
-        cfg: RegressionConfig,
-        baseline: dict[str, Any],
-        current: dict[str, TestReport],
-        shared: list[str],
-    ) -> list[GateResult]:
-        """Evaluate the configured relative gates over tests both runs share."""
-        gates: list[GateResult] = []
-
-        if cfg.max_quality_drop is not None and shared:
-            before = [float(baseline[tid].get("score") or 0.0) for tid in shared]
-            after = [current[tid].score() for tid in shared]
-            if all(value is not None for value in after):
-                baseline_quality = sum(before) / len(before)
-                current_quality = sum(value for value in after if value is not None) / len(after)
-                drop = baseline_quality - current_quality
-                ok = drop <= cfg.max_quality_drop
-                gates.append(
-                    GateResult(
-                        name="regression.quality_drop",
-                        status=Status.PASS if ok else Status.FAIL,
-                        actual=round(drop, 4),
-                        threshold=f"<= {cfg.max_quality_drop}",
-                        message=(
-                            ""
-                            if ok
-                            else f"quality dropped {drop:.3f}: "
-                            f"{baseline_quality:.3f} -> {current_quality:.3f}"
-                        ),
-                        source="regression",
-                    )
-                )
-
-        if cfg.max_cost_increase_pct is not None and shared:
-            gates.append(
-                _relative_gate(
-                    name="regression.cost_increase",
-                    label="cost",
-                    limit=cfg.max_cost_increase_pct,
-                    ignore_below=cfg.ignore_regression_below_pct,
-                    before=sum(float(baseline[tid].get("cost_usd") or 0.0) for tid in shared),
-                    after=sum(current[tid].cost_usd or 0.0 for tid in shared),
-                )
-            )
-
-        if cfg.max_latency_increase_pct is not None and shared:
-            gates.append(
-                _relative_gate(
-                    name="regression.latency_increase",
-                    label="latency",
-                    limit=cfg.max_latency_increase_pct,
-                    ignore_below=cfg.ignore_regression_below_pct,
-                    before=sum(float(baseline[tid].get("duration_ms") or 0.0) for tid in shared),
-                    after=sum(current[tid].duration_ms or 0.0 for tid in shared),
-                )
-            )
-
-        return gates
-
-    def _overall_status(self, report: RunReport) -> Status:
-        """Fold every dimension into one verdict, worst first.
-
-        ``ERROR`` outranks ``FAIL`` deliberately (§32). When a test's infrastructure
-        faulted, that is the thing a maintainer fixes first, and reporting the run
-        as a mere quality failure would bury it behind assertion noise.
-        """
-        if not report.tests:
-            return Status.SKIP
-        if report.summary.errored:
-            return Status.ERROR
-        if any(g.status is Status.FAIL for g in report.gates):
-            return Status.FAIL
-        if report.regression.status is Status.FAIL:
-            return Status.FAIL
-        if report.regression.status is Status.WARN or report.summary.warned:
-            # ``--fail-on-warn`` is a gate policy, so it changes the verdict rather
-            # than only the exit code -- otherwise an artifact would claim WARN
-            # while CI reports the same run as failed.
-            return Status.FAIL if self.options.fail_on_warn else Status.WARN
-        return Status.PASS
 
     # -- misc -----------------------------------------------------------------
 
@@ -1169,31 +874,6 @@ def _render_error(error: BaseException) -> str:
 def _restamp(event: TraceEvent, run_id: str) -> TraceEvent:
     """Align a returned event's ``run_id`` with the invocation it belongs to."""
     return event if event.run_id == run_id else event.model_copy(update={"run_id": run_id})
-
-
-def _blocking(violations: Sequence[PolicyViolation]) -> list[PolicyViolation]:
-    """Only agent-attributable violations decide a verdict."""
-    return [v for v in violations if v.severity is Status.FAIL]
-
-
-def _dedupe_violations(violations: Sequence[PolicyViolation]) -> list[PolicyViolation]:
-    """Collapse duplicates, keeping the most severe instance of each.
-
-    Severity matters: a violation seen once in agent scope (FAIL) and once in test
-    scope (WARN) must not be collapsed down to the WARN, which would silently stop
-    it blocking.
-    """
-    seen: dict[tuple[str, str, str], PolicyViolation] = {}
-    order: list[tuple[str, str, str]] = []
-    for violation in violations:
-        key = (violation.kind, violation.tool or "", violation.message)
-        existing = seen.get(key)
-        if existing is None:
-            seen[key] = violation
-            order.append(key)
-        elif violation.severity is Status.FAIL and existing.severity is not Status.FAIL:
-            seen[key] = violation
-    return [seen[key] for key in order]
 
 
 async def _await(awaitable: Any) -> Any:  # pragma: no cover - trivial wrapper

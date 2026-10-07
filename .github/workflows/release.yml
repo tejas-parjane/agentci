@@ -64,21 +64,22 @@ jobs:
             --title "$tag" \
             --notes "$notes"
 
-  # PyPI publication is deliberately deferred until the repository is public and
-  # the first tag has been verified by hand. To enable it: create a PyPI project
-  # named `agentci-py`, add a `PYPI_API_TOKEN` repository secret, uncomment the
-  # job below, and re-run the tag.
-  #
-  # pypi:
-  #   name: Publish to PyPI
-  #   runs-on: ubuntu-latest
-  #   needs: build
-  #   environment: pypi
-  #   permissions:
-  #     id-token: write          # trusted publishing; no long-lived token
-  #   steps:
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         name: dist
-  #         path: dist/
-  #     - uses: pypa/gh-action-pypi-publish@release/v1
+  # Publish to PyPI as `agentci-py` (the `agentci` name is an unrelated product).
+  # One-time setup, done in PyPI: create the `agentci-py` project and add a
+  # trusted publisher for this repository (owner tejas-parjane, workflow
+  # release.yml). No long-lived token is needed; pushes of `v*` tags that pass
+  # the checks restart this job.
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write          # trusted publishing; no long-lived token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

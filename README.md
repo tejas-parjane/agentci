@@ -34,10 +34,44 @@ def test_refund_is_approved_with_a_policy_check(agent):
 ## Install
 
 ```bash
+pip install agentci-py
+# with the OpenAI Agents integration:
+pip install "agentci-py[openai-agents]"
+```
+
+Requires Python 3.11 or newer. Before the first PyPI release you can install from
+Git instead:
+
+```bash
 pip install git+https://github.com/tejas-parjane/agentci.git
 ```
 
-Requires Python 3.11 or newer.
+## 60-second quickstart
+
+```bash
+cd your-project
+pip install "agentci-py[openai-agents]"
+
+agentci init          # agentci.yaml + a starter test that runs offline
+agentci run           # PASS — no API key needed
+```
+
+That proves the harness works. Wire your agent (the [OpenAI Agents
+integration](#run-an-existing-openai-agents-project-without-rewriting-it) takes
+an existing `agents.Agent` with zero rewrite), assert the behaviour that must
+never break, and gate it:
+
+```bash
+agentci record --name refund          # capture today's behaviour once
+# ... an engineer touches the refund flow ...
+agentci replay .agentci/traces/refund.jsonl          # FAIL: the run diverged
+agentci diff .agentci/traces/refund.jsonl .agentci/traces/refund-replay.jsonl
+agentci gate                                        # RELEASE GATE: BLOCKED
+```
+
+One loop, four words repeated in every release: **record, replay, diff, block.**
+Each step is a real agentci command with a real exit code, and the rest of this
+README says what each one verifies.
 
 ## Quick start
 
@@ -74,14 +108,18 @@ so an application you already built can be run, traced, mocked, and release-gate
 as-is:
 
 ```bash
-pip install "agentci-py[openai-agents] @ git+https://github.com/tejas-parjane/agentci.git"
+pip install "agentci-py[openai-agents]"
 ```
 
-Wrap the root agent once and point `agent.adapter` at it:
+Wrap the root agent once, point `agent.adapter` at it, and assert the behaviour
+that must never break. The demo pins a deterministic scripted model (from
+`agents.testing`) so the whole flow runs offline with no API key; swap in your
+agent's own model/provider and the trace, replay, and gate work exactly the same:
 
 ```python
 # support_agent.py
 from agents import Agent, function_tool
+from agents.testing.model import ScriptedModel, assistant_message, function_call
 from agentci.integrations.openai_agents import AgentCI
 
 @function_tool
@@ -92,11 +130,47 @@ root = Agent(
     name="refunder",
     instructions="Refund customer orders.",
     tools=[refund_order],
+    # Deterministic stand-in: a real engine like OpenAI will call the same tools.
+    model=ScriptedModel([
+        {"output": [function_call("refund_order", {"order_id": "ORD-7781", "amount": 49.99}, call_id="call_1")]},
+        {"output": [assistant_message("Refund issued for ORD-7781.")]},
+    ]),
 )
 
 class SupportAgent(AgentCI):          # yaml: agent.adapter: "support_agent:SupportAgent"
     def __init__(self):
         super().__init__(root)
+```
+
+```python
+# test_refund.py
+from agentci.assertions import expect
+from agentci.testing import agent_test
+
+
+@agent_test(tags=["refund"])
+def test_refund_happens_exactly_once(agent):
+    result = agent.run("please refund order ORD-7781")
+    expect(result).to_use_tool("refund_order", times=1)
+```
+
+```yaml
+# agentci.yaml
+version: 1
+project:
+  name: support
+agent:
+  adapter: "support_agent:SupportAgent"
+execution:
+  # Refunds are real money: denied unless mocked; the mock answers the recording.
+  external_side_effects: deny
+  mocks:
+    refund_order:
+      response: {refunded: true, amount_refunded: 49.99}
+storage:
+  dir: .agentci
+tests:
+  - file: test_refund.py
 ```
 
 Every function tool in the reachable agent graph (handoffs included) routes
@@ -105,29 +179,23 @@ against a `refund_order` you never had to change. The SDK itself is untouched:
 `Runner.run` still performs the loop, just on a harness-owned event loop, and the
 agent graph is cloned per run so the original tool objects stay pristine.
 
-The interesting part is what an unmodified agent buys you: a **recorded
-behavioral ground truth**. First, capture the current agent doing the right thing
-(one refund):
+Now the loop. Capture today's behaviour (one refund) as ground truth:
 
 ```text
+$ agentci run
+PASS 1/1 passed, 0 failed, 0 errored, 0 skipped
+
 $ agentci record --name refund
-recorded agentci_test_... -> .agentci/traces/refund.jsonl
+recorded agentci_test_refund_test_refund_happens_exactly_once -> .agentci/traces/refund.jsonl (11 events)
 ```
 
-And confirm an unchanged agent replays clean:
-
-```text
-$ agentci replay --root . .agentci/traces/refund.jsonl
-recorded scenario replayed clean; trace matches the recording
-```
-
-Now an engineer "fixes" order handling — perhaps as genuinely subtle as a batch
-refund loop — and the agent refunds the order twice. Run the same recording again:
+An engineer "fixes" order handling — as perversely subtle as a batch refund loop —
+and the agent now refunds the order twice. The recording still answers only one:
 
 ```text
 $ agentci replay .agentci/traces/refund.jsonl
-FAIL: replay diverged — the run tried refund_order a second time, which the
-recording never answered
+FAIL 0/1 passed, 1 failed, 0 errored, 0 skipped
+replay wrote 15 events -> .agentci/traces/refund-replay.jsonl
 ```
 
 Every tool call the recording never saw is refused and marked `replay: divergent`,
@@ -138,23 +206,26 @@ the recording and the replay:
 $ agentci diff .agentci/traces/refund.jsonl .agentci/traces/refund-replay.jsonl
 trace diff: .agentci/traces/refund.jsonl -> .agentci/traces/refund-replay.jsonl
 
-  tool calls  1 -> 2  (+1)
-  ...
+  tool calls   2 -> 3  (+1)
+  model calls  3 -> 4  (+1)
+  denied       0 -> 1  (+1)
+
   added:
     refund_order  (order_id='ORD-7781', amount=49.99)
 
-BEHAVIOR: CHANGED (1 addition(s))
+BEHAVIOR: CHANGED (2 addition(s))
 ```
 
 A regression refund is now a name in a diff, not a spot check. Point the release
 job at the same suite and the change cannot ship:
 
 ```text
+$ agentci gate
 RELEASE GATE: BLOCKED
-  - the run failed: 1 failing test(s); regressed against the recorded baseline
+  - the run failed: 1 failing test(s); 1 failing assertion(s); failing gate(s): tests
 ```
 
-That is the full loop for an agent your team already built: **record the behavior
+That is the full loop for an agent your team already built: **record the behaviour
 that must never break, break the agent, watch the gate name the reason.**
 
 ## The release gate
@@ -316,11 +387,11 @@ Markdown block to `$GITHUB_STEP_SUMMARY`. Run the suite on pull requests and put
 - uses: actions/setup-python@v5
   with:
     python-version: "3.12"
-- run: pip install git+https://github.com/tejas-parjane/agentci.git
+- run: pip install "agentci-py[openai-agents]"
 - run: agentci run --changed
 
 # .github/workflows/release.yml — the verdict before shipping
-- run: pip install git+https://github.com/tejas-parjane/agentci.git
+- run: pip install "agentci-py[openai-agents]"
 - run: |
     PREV=$(git describe --tags --abbrev=0 HEAD^ || echo origin/main)
     agentci gate --base "$PREV"
@@ -386,7 +457,9 @@ Not yet wired up:
 
 - HTML report rendering. `report.html` is a reserved option with no renderer
   behind it.
-- PyPI publication (install from GitHub until then).
+
+The release workflow publishes the `agentci-py` wheel to PyPI on `v*` tags via
+trusted publishing; until the first tag is created, install from GitHub.
 
 ## Documentation
 

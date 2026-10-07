@@ -62,6 +62,10 @@ parse `report.json` should pin `schema_version`, not the release.
   Installable via the `openai-agents` extra. Covered by
   `tests/test_openai_agents.py`, which drives record→replay→diff end to end
   against a `ScriptedModel` and blocks a second refund.
+- **PyPI publication job** in `.github/workflows/release.yml`: on `v*` tags the
+  built wheel is published to PyPI as `agentci-py` via trusted publishing.
+  Install docs now use `pip install agentci-py` /
+  `pip install "agentci-py[openai-agents]"`.
 
 ### Changed
 

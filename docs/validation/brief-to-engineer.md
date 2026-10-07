@@ -17,9 +17,15 @@ application, then tell us honestly what you think it is doing.
 1. Clone `https://github.com/tejas-parjane/agentci`.
 2. Follow the README from a clean environment. Start at **Install**, then
    **60-second quickstart**.
-3. Install AgentCI with the OpenAI Agents integration
-   (`pip install "agentci-py[openai-agents]"` from the wheel or the Git URL in
-   the README).
+3. Install AgentCI with the OpenAI Agents integration. **The package is not on
+   PyPI yet** — this validation tests the pre-release path, and how you get to
+   it is part of the test. The README's Install section says what to do "before
+   the first PyPI release"; if that instruction hides from you, that is a
+   finding, not your fault. Record what happened verbatim. A working option:
+   ```
+   pip install "git+https://github.com/tejas-parjane/agentci.git[openai-agents]"
+   ```
+   (or, from your clone of this repo: `pip install ".[openai-agents]"`).
 4. Run the example:
    ```
    cd examples/openai_agents_refund
@@ -53,8 +59,10 @@ Then answer the closing questions (no research needed — instinct is the data):
 - Do not skip ahead; stop at the first step that blocks you, note exactly where
   and why, and you're done. That is a successful run for us.
 - Send back: your answers to the two questions, the step that took longest,
-  anything you got stuck on, and your environment (OS, Python version,
-  install command you used).
+  anything you got stuck on, your environment (OS, Python version, install
+  command you used), and — for the install step — whether the README's
+  pre-PyPI fallback found you before or after the `pip install agentci-py…`
+  command failed, or never did.
 
 No hand-holding — if you get stuck, the documentation visibility is part of
 what we're testing.

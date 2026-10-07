@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -38,10 +39,17 @@ from agentci.core.config import (
     load_config,
     resolve_test_files,
 )
+from agentci.core.diff import trace_diff
+from agentci.core.replay import (
+    ReplaySession,
+    extract_test_id,
+    load_trace_file,
+    write_trace_file,
+)
 from agentci.core.result import Status
 from agentci.core.runner import RunOptions, TestRunner
 from agentci.core.selection import SelectionPlan, build_plan
-from agentci.errors import AgentCIError, ConfigError, ExitCode
+from agentci.errors import AgentCIError, ConfigError, ExitCode, ReplayError
 from agentci.reporting.models import RunReport
 from agentci.reporting.renderers import (
     render_annotations,
@@ -287,6 +295,206 @@ def run_command(
             _render_terminal(report, quiet=quiet)
         _write_github_outputs(report)
         raise typer.Exit(_exit_code(report))
+
+
+# Trace artifact naming. A scenario name becomes a path, so it must be flat and
+# safe; this is the same narrowing the codebase applies everywhere an identifier
+# crosses the filesystem boundary.
+_ARTIFACT_NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _safe_artifact_name(name: str) -> str:
+    if not re.fullmatch(_ARTIFACT_NAME, name):
+        raise ConfigError(
+            f"invalid trace artifact name {name!r}",
+            hint="use letters, digits, and '.', '_', '-' only",
+        )
+    return name
+
+
+def _display_path(path: Path, base: Path) -> str:
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+@app.command("record")
+def record_command(
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to agentci.yaml."),
+    root: Path | None = typer.Option(None, "--root", help="Project root; all paths resolve under it."),
+    name: str = typer.Option(..., "--name", help="Artifact name; one test -> <name>.jsonl."),
+    tag: list[str] = typer.Option([], "--tag", "-k", help="Record only tests carrying this tag."),
+    test_id: list[str] = typer.Option([], "--test-id", help="Record only these test ids."),
+    match: str | None = typer.Option(None, "--match", help="Substring match on test name or id."),
+    json_out: bool = typer.Option(False, "--json", help="Print the artifact index as JSON."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Only print the recorded paths."),
+) -> None:
+    """Run a scenario once and persist a standalone, replayable v1 trace."""
+    with _handle_errors():
+        loaded, base = _load(config, root)
+        safe = _safe_artifact_name(name)
+        cases, options, _ = _select(
+            loaded,
+            base,
+            tags=tag,
+            test_ids=test_id,
+            pattern=match,
+            repeat=1,
+            fail_on_warn=False,
+            no_traces=False,
+            selected_by="all",
+            selection_reason="",
+            changed=False,
+            base=None,
+        )
+        if not cases:
+            err_console.print("no tests selected")
+            raise typer.Exit(ExitCode.NO_TESTS.value)
+        options.record_traces = True
+
+        runner = TestRunner(loaded, options=options)
+        report = runner.run(cases)
+        traces_root = base / loaded.storage.dir / "traces"
+
+        recorded: list[dict[str, str | int]] = []
+        for test in report.tests:
+            if not test.iterations:
+                continue
+            events = runner.store.load_trace(test.iterations[0].run_id)
+            if not events:
+                continue
+            if len(report.tests) == 1:
+                target = traces_root / f"{safe}.jsonl"
+            else:
+                target = traces_root / safe / f"{_safe_artifact_name(test.test_id)}.jsonl"
+            write_trace_file(target, events, redactor=runner.redactor)
+            recorded.append(
+                {
+                    "test_id": test.test_id,
+                    "path": _display_path(target, base),
+                    "run_id": test.iterations[0].run_id,
+                    "events": len(events),
+                }
+            )
+
+        if not recorded:
+            err_console.print("nothing was recorded")
+            raise typer.Exit(ExitCode.NO_TESTS.value)
+
+        if json_out:
+            console.print_json(json.dumps({"schema_version": 1, "name": safe, "traces": recorded}))
+        elif not quiet:
+            for entry in recorded:
+                console.print(
+                    f"recorded {entry['test_id']} -> {entry['path']} ({entry['events']} events)"
+                )
+        raise typer.Exit(ExitCode.PASS.value)
+
+
+@app.command("replay")
+def replay_command(
+    trace: Path = typer.Argument(..., help="Recorded v1 trace artifact to replay."),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to agentci.yaml."),
+    root: Path | None = typer.Option(None, "--root", help="Project root; all paths resolve under it."),
+    test_id: str | None = typer.Option(
+        None, "--test-id", help="Test to replay; default: the one the artifact recorded."
+    ),
+    out: Path | None = typer.Option(
+        None, "--out", help="Write the replayed trace artifact here. Default: <name>-replay.jsonl."
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Print the JSON report to stdout."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Only print the summary line."),
+    output: Path | None = typer.Option(None, "--output", help="Write the JSON report to this path."),
+) -> None:
+    """Re-execute a recorded scenario against the current agent.
+
+    Every tool call is answered from the recorded trace instead of running live,
+    so behavior is the only thing that can change. A call the recording never
+    answered is refused and marked divergent, which fails the run.
+    """
+    with _handle_errors():
+        loaded, base = _load(config, root)
+        events = load_trace_file(trace)
+        if not events:
+            raise ReplayError(f"{trace} contains no events", hint="re-record the scenario")
+        wanted = test_id or extract_test_id(events)
+        if not wanted:
+            raise ReplayError(
+                f"{trace} does not record which test it came from",
+                hint="pass --test-id ... to replay it",
+            )
+        cases, options, _ = _select(
+            loaded,
+            base,
+            tags=[],
+            test_ids=[wanted],
+            pattern=None,
+            repeat=1,
+            fail_on_warn=False,
+            no_traces=False,
+            selected_by="replay",
+            selection_reason=str(trace),
+            changed=False,
+            base=None,
+        )
+        if not cases:
+            err_console.print(f"no test named {wanted!r}")
+            raise typer.Exit(ExitCode.NO_TESTS.value)
+        options.replay = ReplaySession(events, source=trace.name)
+        options.record_traces = True
+
+        runner = TestRunner(loaded, options=options)
+        report = runner.run(cases)
+
+        replay_run_id = (
+            report.tests[0].iterations[0].run_id
+            if report.tests and report.tests[0].iterations
+            else None
+        )
+        artifact = out or base / loaded.storage.dir / "traces" / f"{trace.stem}-replay.jsonl"
+        new_events = runner.store.load_trace(replay_run_id) if replay_run_id else []
+        write_trace_file(artifact, new_events, redactor=runner.redactor)
+
+        if json_out:
+            console.print_json(render_json(report))
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(render_json(report), encoding="utf-8")
+
+        if not json_out:
+            _render_terminal(report, quiet=quiet)
+            console.print(
+                f"replay wrote {len(new_events)} events -> {_display_path(artifact, base)}"
+            )
+        raise typer.Exit(_exit_code(report))
+
+
+@app.command("diff")
+def diff_command(
+    base_trace: Path = typer.Argument(..., help="Earlier trace artifact."),
+    head_trace: Path = typer.Argument(..., help="Later trace artifact."),
+    json_out: bool = typer.Option(False, "--json", help="Print the machine-readable diff."),
+) -> None:
+    """Compare two trace artifacts and print what behavior changed.
+
+    The diff is over the behavioral contract of the spec — event kind, order,
+    tool identity, arguments, results, and status — never over ids, timing, or
+    cost. Exit code is 0 when behavior is unchanged, 1 when it changed.
+    """
+    with _handle_errors():
+        base_events = load_trace_file(base_trace)
+        head_events = load_trace_file(head_trace)
+        result = trace_diff(
+            base_events, head_events, a_label=str(base_trace), b_label=str(head_trace)
+        )
+        if json_out:
+            console.print_json(json.dumps(result.to_dict()))
+        else:
+            console.print(result.render(), markup=False)
+        if result.behavior_changed:
+            raise typer.Exit(ExitCode.GATE_FAILED.value)
+        raise typer.Exit(ExitCode.PASS.value)
 
 
 def _gate_reasons(

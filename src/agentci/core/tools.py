@@ -106,6 +106,7 @@ class ToolRegistry:
         self._declarations: dict[str, ToolDecl] = dict(declarations or {})
         self._recorder = recorder
         self._mocks = dict(mocks or {})
+        self._replay: Any = None
         self.denied_tools = set(denied_tools or ())
         self.allowed_tools = set(allowed_tools) if allowed_tools else set()
         self.approval_required = set(approval_required or ())
@@ -207,7 +208,7 @@ class ToolRegistry:
         *,
         bypass_mock: bool = False,
     ) -> Any:
-        """Run policy, then mocks, then the live implementation."""
+        """Run policy, then replay answers or mocks, then the live implementation."""
         args = dict(arguments or {})
         decision = self.decide(name)
 
@@ -229,6 +230,40 @@ class ToolRegistry:
                     "policies.approval_required"
                 ),
             )
+
+        if self._replay is not None and not bypass_mock:
+            # The recorded artifact is the ground truth of what happened, so it
+            # outranks both config mocks and any live implementation: the point of
+            # replay is "does the agent still behave like the recording", and
+            # answering a call a config mock also happens to cover would conceal a
+            # behavioral change.
+            answer = self._replay.serve(name, args)
+            if answer is None:
+                # Behavior the recording never saw. Refuse like any other denied
+                # call and hand the agent an explicit refusal, so its handling of
+                # it is part of the replayed trace.
+                self._record(
+                    name,
+                    args,
+                    status=EventStatus.DENIED,
+                    result={"reason": "not_in_recorded_trace"},
+                    metadata={
+                        "replay": "divergent",
+                        "mock_source": f"replay:{self._replay.source}",
+                    },
+                )
+                return {"reason": "not_in_recorded_trace"}
+            metadata: dict[str, Any] = {"mock_source": f"replay:{self._replay.source}"}
+            if answer.args_differ:
+                metadata["replay_args_differ"] = True
+            self._record(
+                name,
+                args,
+                status=EventStatus.MOCKED,
+                result=answer.result,
+                metadata=metadata,
+            )
+            return answer.result
 
         mock = self._mocks.get(name)
         if mock is not None and not bypass_mock:
@@ -303,6 +338,10 @@ class ToolRegistry:
 
     def add_mock(self, name: str, entry: MockEntry) -> None:
         self._mocks[name] = entry
+
+    def attach_replay(self, session: Any) -> None:
+        """Serve every tool call from a recorded session (``agentci replay``)."""
+        self._replay = session
 
     def grant_approval(self, name: str) -> None:
         self.granted_approvals.add(name)

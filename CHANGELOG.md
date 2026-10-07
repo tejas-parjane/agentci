@@ -33,6 +33,23 @@ parse `report.json` should pin `schema_version`, not the release.
   the serialization-time redaction boundary. `schema_version` stays 1 and is
   pinned by `tests/test_trace_spec.py`, which also enforces the canonical
   example byte-for-byte through the store.
+- **`agentci record --name <scenario>`**, which runs a scenario once and exports
+  a standalone v1 trace artifact (`.agentci/traces/<name>.jsonl`, or one file per
+  test under `<name>/` for multi-test scenarios). Replay's ground truth lives
+  there, next to the per-run artifacts.
+- **`agentci replay <trace.jsonl>`**, which re-executes the recorded scenario
+  against the *current* agent with every tool call answered from the artifact —
+  replay outranks config mocks and live implementations. A call the recording
+  never answered is refused, recorded as `replay: divergent`, and fails the run,
+  so a replay is never silently "fine". The replayed trace is exported side by
+  side with the recording for diffing.
+- **`agentci diff <a.jsonl> <b.jsonl>`**, which compares two artifacts over the
+  spec's behavioral line — event kinds, order, tool identity, arguments, and
+  statuses — while reporting latency/cost/tokens as measurements, not behavior.
+  Exits 0 unchanged / 1 changed.
+- `tests/test_replay.py` and `tests/test_diff.py`, covering the session's FIFO
+  answering, the record→replay→diff round trip, and a replay that catches an
+  agent now refunding twice.
 
 ### Changed
 

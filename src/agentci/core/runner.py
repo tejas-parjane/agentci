@@ -54,7 +54,7 @@ from agentci.adapters.python import (
 )
 from agentci.assertions import execution as budget_assertions
 from agentci.assertions import leaks as leak_assertions
-from agentci.assertions.base import AssertionCollector, AssertionFailed
+from agentci.assertions.base import AssertionCollector, AssertionFailed, Kind, make
 from agentci.assertions.fluent import activate, deactivate
 from agentci.core.config import Config
 from agentci.core.context import RunContext
@@ -72,6 +72,7 @@ from agentci.core.postprocess import (
 )
 from agentci.core.recorder import TraceRecorder
 from agentci.core.redaction import DEFAULT_PATTERNS, Redactor
+from agentci.core.replay import ReplaySession
 from agentci.core.result import (
     AgentResult,
     AssertionResult,
@@ -202,6 +203,9 @@ class RunOptions:
     record_traces: bool | None = None
     fail_on_warn: bool = False
     root: Path | None = None
+    #: Set by ``agentci replay``. When present, every tool call is answered from
+    #: the recorded session instead of a live or configured implementation.
+    replay: ReplaySession | None = None
 
 
 @dataclass
@@ -442,6 +446,8 @@ class TestRunner:
             self.config, redactor=self.redactor, metrics=RunMetrics()
         )
         registry = engine.build_registry(self.adapter.tools, recorder=recorder)
+        if self.options.replay is not None:
+            registry.attach_replay(self.options.replay)
         ctx = RunContext(
             run_id=run_id,
             recorder=recorder,
@@ -487,6 +493,8 @@ class TestRunner:
         assertions = list(collector.results)
         assertions.extend(self._budget_assertions(metrics))
         assertions.extend(self._leak_assertions(trace, handle))
+        if self.options.replay is not None:
+            assertions.append(self._replay_assertion(trace))
 
         status, message, category = self._iteration_status(assertions, violations, body_error)
         trace_ref = self._persist(run_id, trace, handle)
@@ -585,6 +593,43 @@ class TestRunner:
         """
         output = handle.last.output_text if handle.last is not None else ""
         return [leak_assertions.leak_scan(trace, output, self.redactor)]
+
+    def _replay_assertion(self, trace: Trace) -> AssertionResult:
+        """Every call the recording never answered is a behavioral divergence.
+
+        Replay answers each tool from the recorded trace; a call with no recorded
+        answer is refused and marked ``replay: divergent``. That is the double
+        refund, the missing tool, the new dependency — the reason someone runs a
+        replay at all — so it must fail the run, not merely appear in it.
+        """
+        divergent = [
+            e
+            for e in trace.events
+            if e.type is EventType.TOOL_CALL_COMPLETED
+            and e.status.value == "denied"
+            and e.metadata.get("replay") == "divergent"
+        ]
+        if not divergent:
+            return make(
+                kind=Kind.REGRESSION,
+                name="to_replay",
+                description="every tool call was answered by the recorded trace",
+                ok=True,
+            )
+        names = ", ".join(sorted({e.tool.name for e in divergent if e.tool}))
+        return make(
+            kind=Kind.REGRESSION,
+            name="to_replay",
+            description="every tool call was answered by the recorded trace",
+            ok=False,
+            actual=divergent,
+            expected="no call outside the recorded trace",
+            message=(
+                f"replay: the agent called a tool the recording never answered "
+                f"({names}); behavior diverged from the recorded trace"
+            ),
+            hint="diff the replayed trace against the recording to see what changed",
+        )
 
     def _iteration_status(
         self,

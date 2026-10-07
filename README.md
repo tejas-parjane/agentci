@@ -187,6 +187,9 @@ agentci config
 | `agentci config` | Validate `agentci.yaml`, print the resolved config |
 | `agentci baseline save` | Store this run as the comparison baseline |
 | `agentci baseline show` | Show what a saved baseline contains |
+| `agentci record --name <scenario>` | Run a scenario once and export a standalone replay artifact |
+| `agentci replay <trace.jsonl>` | Re-run the recorded scenario; calls outside it fail the run |
+| `agentci diff <a.jsonl> <b.jsonl>` | Compare two trace artifacts; exit 0 unchanged, 1 changed |
 | `agentci version` | Print the version |
 
 Selection: `--tag` / `-k` (repeatable), `--test-id` (repeatable), `--name`
@@ -273,13 +276,16 @@ Since 0.1.0, change-aware selection (`--changed`, diff + `dependencies=`) and th
 customer-support refund example that ships with a deliberate regression the suite
 catches.
 
+Replay is wired end to end against the Trace Specification v1: `agentci record`
+exports a scenario as a standalone artifact, `agentci replay` re-executes it with
+every tool call answered from the recording (a call the recording never saw is
+refused, recorded as `replay: divergent`, and fails the run), and `agentci diff`
+tells you what behavior changed between two artifacts.
+
 Not yet wired up:
 
 - HTML report rendering. `report.html` is a reserved option with no renderer
   behind it.
-- Replay. The policy engine already accepts replay-supplied mocks, but nothing
-  produces them and there is no `agentci replay` command; `HttpAgentAdapter`
-  calls its endpoint for real.
 - PyPI publication (install from GitHub until then).
 
 ## Documentation

@@ -44,6 +44,8 @@ Git instead:
 
 ```bash
 pip install git+https://github.com/tejas-parjane/agentci.git
+# with the OpenAI Agents integration:
+pip install "agentci-py[openai-agents] @ git+https://github.com/tejas-parjane/agentci.git"
 ```
 
 ## 60-second quickstart

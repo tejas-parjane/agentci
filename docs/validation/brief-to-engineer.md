@@ -26,7 +26,7 @@ application, then tell us honestly what you think it is doing.
    the first PyPI release"; if that instruction hides from you, that is a
    finding, not your fault. Record what happened verbatim. A working option:
    ```
-   pip install "git+https://github.com/tejas-parjane/agentci.git[openai-agents]"
+   pip install "agentci-py[openai-agents] @ git+https://github.com/tejas-parjane/agentci.git"
    ```
    (or, from your clone of this repo: `pip install ".[openai-agents]"`).
 4. Run the example:

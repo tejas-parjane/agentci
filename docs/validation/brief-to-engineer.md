@@ -9,7 +9,10 @@ application, then tell us honestly what you think it is doing.
 
 ## Setup
 
-- Python 3.11 or 3.12 on your machine (a clean virtualenv is fine).
+- Python **3.11 or 3.12 specifically** (the project declares 3.11+; this run
+  also checks that baseline). If you only have 3.13/3.14 installed, the results
+  are still useful — but say so, and prefer a clean virtualenv on 3.11/3.12 if
+  you can.
 - `git` available on PATH.
 
 ## Task (in order)

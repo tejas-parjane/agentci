@@ -42,14 +42,35 @@ Was a virtualenv clean at start?:
 | Would put in CI | | |
 | Expected next | | |
 
+## Triage rubric (apply to every finding)
+
+Fixes before release are **P0 and P1 only**. P2 is logged on the roadmap and
+does not move the release.
+
+- **P0 — blocks the protocol.** Can't install/run; can't understand how to
+  record; replay doesn't reproduce; diff doesn't identify the behavioral
+  change; gate doesn't correctly block the regression; Python 3.11/3.12
+  incompatibility.
+- **P1 — significant friction.** README ambiguity, confusing CLI, unclear error
+  messages, unclear trace/replay artifacts, unclear explanation of why a
+  release was blocked.
+- **P2 — feature requests.** More frameworks, dashboards, more assertions,
+  cloud features, more integrations. Log, defer, do not fix before the tag.
+
 ## Decision rule
 
-- **All-clear** — every engineer reached `RELEASE GATE: BLOCKED` unaided, and
-  could explain the block: publish `v0.1.1`, then recruit early OSS adopters.
+- **The primary qualitative signal** is not "did it work" but: *after seeing
+  `RELEASE GATE: BLOCKED`, could the engineer immediately explain what changed,
+  why it matters, and what to fix?* A consistent "it blocked but I don't know
+  why" outweighs any feature request.
+- **All-clear** — every engineer reached `RELEASE GATE: BLOCKED` unaided and
+  explained the block; no P0/P1 findings: publish `v0.1.1`.
+- **Tag condition** — if several engineers independently say "I would put this
+  in CI," that is the adoption signal to tag `v0.1.1`.
 - **Any stall** — at least one engineer failed, got silently confused, or
-  authored a wrong explanation: fix the README/quickstart first, re-run the
-  clean-environment walkthrough, then repeat one or two validations before
-  tagging. Passing tests are not product readiness.
+  authored a wrong explanation, or any P0/P1 finding landed: fix the
+  README/quickstart first, walk the clean environment again, and re-validate
+  one or two engineers before tagging. Passing tests are not product readiness.
 
 Record here the exact fixes the stall required, so the next round only
 re-validates the changed surface.

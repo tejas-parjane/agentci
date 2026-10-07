@@ -9,6 +9,8 @@ parse `report.json` should pin `schema_version`, not the release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-07
+
 ### Added
 
 - **Change-aware selection.** `agentci run --changed` skips the tests a diff

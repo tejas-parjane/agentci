@@ -6,7 +6,7 @@ Kept in its own module so that ``pyproject.toml`` can read it via
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 #: Version of the JSON report schema emitted by the reporting layer.
 #: Bumped independently of ``__version__`` when the report shape changes.

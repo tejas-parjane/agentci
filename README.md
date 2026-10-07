@@ -473,6 +473,7 @@ trusted publishing; until the first tag is created, install from GitHub.
   declaration, and reporting usage.
 - [Decision records](docs/adr/) — why the trace format, licence, redaction
   boundary, and exit codes are what they are.
+- [Releasing](RELEASING.md) — the PyPI trusted-publisher setup and the tag flow.
 - [Contributing](CONTRIBUTING.md), [Security policy](SECURITY.md),
   [Changelog](CHANGELOG.md).
 

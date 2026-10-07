@@ -16,6 +16,10 @@ setup has happened; the tag is the only trigger.
 
 ## Per release
 
+0. **Engineer validation (before the first tag).** Run `docs/validation/` — the
+   30-minute brief plus the capture sheet — against 5–10 engineers. Publish only
+   when all-clear; on any stall, fix the README/quickstart and re-validate
+   before tagging. The quickstart is part of the product.
 1. **Version.** Bump `__version__` in `src/agentci/__about__.py` (single source
    of truth; `pyproject.toml` reads it via `[tool.hatch.version]`). First
    release on PyPI is `0.1.1`: `v0.1.0` was tagged but never published.

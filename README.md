@@ -114,7 +114,8 @@ pip install "agentci-py[openai-agents]"
 Wrap the root agent once, point `agent.adapter` at it, and assert the behaviour
 that must never break. The demo pins a deterministic scripted model (from
 `agents.testing`) so the whole flow runs offline with no API key; swap in your
-agent's own model/provider and the trace, replay, and gate work exactly the same:
+agent's own model/provider and the trace, replay, and gate work exactly the same.
+The project below ships ready to run in `examples/openai_agents_refund`.
 
 ```python
 # support_agent.py
@@ -122,24 +123,36 @@ from agents import Agent, function_tool
 from agents.testing.model import ScriptedModel, assistant_message, function_call
 from agentci.integrations.openai_agents import AgentCI
 
+CALLS = 1   # the behaviour under test — "fixing" this to 2 is the regression
+
+@function_tool
+def lookup_order(order_id: str):
+    return {"status": "open", "order_id": order_id}
+
 @function_tool
 def refund_order(order_id: str, amount: float):
     return {"refunded": True, "order_id": order_id, "amount": amount}
 
-root = Agent(
-    name="refunder",
-    instructions="Refund customer orders.",
-    tools=[refund_order],
-    # Deterministic stand-in: a real engine like OpenAI will call the same tools.
-    model=ScriptedModel([
-        {"output": [function_call("refund_order", {"order_id": "ORD-7781", "amount": 49.99}, call_id="call_1")]},
-        {"output": [assistant_message("Refund issued for ORD-7781.")]},
-    ]),
-)
+def _root_agent():
+    steps = [
+        {"output": [function_call("lookup_order", {"order_id": "ORD-7781"}, call_id="call_1")]},
+    ]
+    for _ in range(CALLS):
+        steps.append(
+            {"output": [function_call("refund_order", {"order_id": "ORD-7781", "amount": 49.99}, call_id=f"call_{2 + _}")]}
+        )
+    steps.append({"output": [assistant_message("Refund issued for ORD-7781.")]})
+    return Agent(
+        name="refunder",
+        instructions="Refund customer orders.",
+        tools=[lookup_order, refund_order],
+        # Deterministic stand-in: a real engine like OpenAI calls the same tools.
+        model=ScriptedModel(steps),
+    )
 
 class SupportAgent(AgentCI):          # yaml: agent.adapter: "support_agent:SupportAgent"
     def __init__(self):
-        super().__init__(root)
+        super().__init__(_root_agent())
 ```
 
 ```python
@@ -431,6 +444,12 @@ worth knowing:
 
 ## Status
 
+**Early public alpha, not a production release.** The interfaces below are
+deliberately being validated by outside engineers before the first PyPI
+publication; expect naming and config to still move. The [engineer validation
+protocol](docs/validation/capture-sheet.md) is how readiness is measured, not
+test counts.
+
 Version 0.1.0 shipped the core runtime, assertion library, policy engine, CLI, and
 report schema. The report schema is versioned independently of the package so
 consumers can pin the shape they parse.
@@ -473,6 +492,8 @@ trusted publishing; until the first tag is created, install from GitHub.
   declaration, and reporting usage.
 - [Decision records](docs/adr/) — why the trace format, licence, redaction
   boundary, and exit codes are what they are.
+- [Engineer validation](docs/validation/brief-to-engineer.md) — the 30-minute
+  first-run protocol and its capture sheet, run before the first release.
 - [Releasing](RELEASING.md) — the PyPI trusted-publisher setup and the tag flow.
 - [Contributing](CONTRIBUTING.md), [Security policy](SECURITY.md),
   [Changelog](CHANGELOG.md).

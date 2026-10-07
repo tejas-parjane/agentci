@@ -1,0 +1,16 @@
+version: 1
+project:
+  name: support
+agent:
+  adapter: "support_agent:SupportAgent"
+execution:
+  external_side_effects: deny
+  mocks:
+    refund_order:
+      response:
+        refunded: true
+        amount_refunded: 49.99
+storage:
+  dir: .agentci
+tests:
+  - file: test_refund.py

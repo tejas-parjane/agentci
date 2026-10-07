@@ -27,6 +27,12 @@ parse `report.json` should pin `schema_version`, not the release.
 - `examples/support_agent/refund_regression.py`, a deliberately regressed refund
   flow that the shipped expectations catch, plus its probe in `scripts/verify.py`.
 - `tests/test_policy_assertions.py`.
+- **AgentCI Trace Specification v1** — the normative contract for
+  `trace.jsonl` (`docs/specification/trace-v1.md`): the closed event grammar,
+  the order/parentage conventions, the determinism contract for replay, and
+  the serialization-time redaction boundary. `schema_version` stays 1 and is
+  pinned by `tests/test_trace_spec.py`, which also enforces the canonical
+  example byte-for-byte through the store.
 
 ### Changed
 

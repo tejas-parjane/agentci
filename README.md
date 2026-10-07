@@ -284,6 +284,10 @@ Not yet wired up:
 
 ## Documentation
 
+- [Trace specification (v1)](docs/specification/trace-v1.md) — the normative
+  trace format: the event grammar, what deterministic replay will reconstruct,
+  and the redaction boundary. The interoperability contract between your agent
+  and AgentCI.
 - [Configuration reference](docs/reference/configuration.md) — every key, its
   default, and what it refuses to do.
 - [Writing an adapter](docs/guides/adapters.md) — the contract, tool

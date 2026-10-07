@@ -50,6 +50,18 @@ parse `report.json` should pin `schema_version`, not the release.
 - `tests/test_replay.py` and `tests/test_diff.py`, covering the session's FIFO
   answering, the record→replay→diff round trip, and a replay that catches an
   agent now refunding twice.
+- **Async tool routing.** `ToolRegistry.ainvoke()` is the async twin of
+  `invoke()` with the same policy layering — replay answers first, then config
+  mocks, then approved live execution — so an async agent calls through the same
+  trace, redaction, and gate machinery as a sync one.
+- **`agentci.integrations.openai_agents`**, an adapter that runs an existing
+  openai-agents application without a rewrite: `AgentCI(root_agent)` re-roots the
+  reachable graph (handoffs included, cloned per run) so every `FunctionTool`
+  routes through the registry, runs the SDK on a harness-owned event loop with
+  tracing disabled, and records `model_call` events alongside tool events.
+  Installable via the `openai-agents` extra. Covered by
+  `tests/test_openai_agents.py`, which drives record→replay→diff end to end
+  against a `ScriptedModel` and blocks a second refund.
 
 ### Changed
 

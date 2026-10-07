@@ -25,6 +25,7 @@ Interception requires adapter cooperation, so adapters are pointed at
 from __future__ import annotations
 
 import enum
+import inspect
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -76,6 +77,19 @@ class MockEntry:
         return dict(arguments) == dict(self.arguments)
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveExecution:
+    """Marker that a tool call must reach a real implementation.
+
+    Shared by :meth:`ToolRegistry.invoke` and :meth:`ToolRegistry.ainvoke` so
+    the decision ladder lives in exactly one place; only the live-execution
+    tail differs (sync vs ``await``).
+    """
+
+    name: str
+    arguments: dict[str, Any]
+
+
 class ToolRegistry:
     """The object exposed to adapters as ``ctx.tools``.
 
@@ -84,6 +98,10 @@ class ToolRegistry:
         ctx.tools.get_order(order_id="123")     # attribute style
         ctx.tools["get_order"](order_id="123")  # item style
         ctx.tools.call("get_order", order_id="123")
+
+    Sync adapters call through these (they end in :meth:`invoke`); async
+    adapters call :meth:`ainvoke`, the async twin that shares the same
+    decision ladder and awaits an awaitable live implementation.
 
     Use :meth:`live` to obtain a deliberately unmediated reference to the real
     implementation. It is still traced, but bypasses mocks and the side-effect
@@ -210,6 +228,39 @@ class ToolRegistry:
     ) -> Any:
         """Run policy, then replay answers or mocks, then the live implementation."""
         args = dict(arguments or {})
+        outcome_or_live = self._route(name, args, bypass_mock=bypass_mock)
+        if isinstance(outcome_or_live, _LiveExecution):
+            return self._invoke_live(outcome_or_live.name, outcome_or_live.arguments)
+        return outcome_or_live
+
+    async def ainvoke(
+        self,
+        name: str,
+        arguments: Mapping[str, Any] | None = None,
+        *,
+        bypass_mock: bool = False,
+    ) -> Any:
+        """Async twin of :meth:`invoke`; awaits an awaitable live implementation."""
+        args = dict(arguments or {})
+        outcome_or_live = self._route(name, args, bypass_mock=bypass_mock)
+        if isinstance(outcome_or_live, _LiveExecution):
+            return await self._ainvoke_live(outcome_or_live.name, outcome_or_live.arguments)
+        return outcome_or_live
+
+    def _route(
+        self,
+        name: str,
+        args: dict[str, Any],
+        *,
+        bypass_mock: bool,
+    ) -> Any | _LiveExecution:
+        """The pure decision ladder shared by :meth:`invoke` and :meth:`ainvoke`.
+
+        Resolved calls (denied, replayed, mocked, side-effect-blocked) return
+        their already-recorded outcome. Calls that must reach a real
+        implementation return a :class:`_LiveExecution` marker for the caller
+        to run; failing live stands in here so both twins raise identically.
+        """
         decision = self.decide(name)
 
         if decision is PolicyDecision.DENY:
@@ -301,6 +352,16 @@ class ToolRegistry:
                 hint="declare it with tool.live(fn) or provide a mock",
             )
 
+        return _LiveExecution(name, args)
+
+    def _invoke_live(self, name: str, args: dict[str, Any]) -> Any:
+        """Execute a live tool call synchronously inside a traced tool span."""
+        decl = self._declarations.get(name)
+        if decl is None or decl.live is None:  # unreachable: _route validated it
+            raise PolicyViolationError(
+                f"tool {name!r} has no live implementation available",
+                hint="declare it with tool.live(fn) or provide a mock",
+            )
         if self._recorder is None:
             # No recorder means the registry was built outside a run. Execute the
             # tool untraced rather than refusing it: losing observability is
@@ -309,6 +370,30 @@ class ToolRegistry:
 
         with self._recorder.tool_call(name, args) as call:
             outcome = decl.live(**args)
+            call.result = outcome
+            usage, cost = _extract_usage(outcome)
+            call.usage = usage
+            call.cost_usd = cost
+            return outcome
+
+    async def _ainvoke_live(self, name: str, args: dict[str, Any]) -> Any:
+        """Execute a live tool call inside a traced tool span, awaiting async ones."""
+        decl = self._declarations.get(name)
+        if decl is None or decl.live is None:  # unreachable: _route validated it
+            raise PolicyViolationError(
+                f"tool {name!r} has no live implementation available",
+                hint="declare it with tool.live(fn) or provide a mock",
+            )
+        if self._recorder is None:
+            outcome = decl.live(**args)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            return outcome
+
+        with self._recorder.tool_call(name, args) as call:
+            outcome = decl.live(**args)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
             call.result = outcome
             usage, cost = _extract_usage(outcome)
             call.usage = usage

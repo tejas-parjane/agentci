@@ -67,6 +67,96 @@ object exposing a tool registry, or a plain function `(user_input) -> AgentResul
 Tools the agent invokes through `ctx.tools` are traced, mocked, and subject to the
 policy in `agentci.yaml`.
 
+### Run an existing openai-agents project without rewriting it
+
+AgentCI ships an adapter for [openai-agents](https://github.com/openai/openai-agents-python)
+so an application you already built can be run, traced, mocked, and release-gated
+as-is:
+
+```bash
+pip install "agentci-py[openai-agents] @ git+https://github.com/tejas-parjane/agentci.git"
+```
+
+Wrap the root agent once and point `agent.adapter` at it:
+
+```python
+# support_agent.py
+from agents import Agent, function_tool
+from agentci.integrations.openai_agents import AgentCI
+
+@function_tool
+def refund_order(order_id: str, amount: float):
+    return {"refunded": True, "order_id": order_id, "amount": amount}
+
+root = Agent(
+    name="refunder",
+    instructions="Refund customer orders.",
+    tools=[refund_order],
+)
+
+class SupportAgent(AgentCI):          # yaml: agent.adapter: "support_agent:SupportAgent"
+    def __init__(self):
+        super().__init__(root)
+```
+
+Every function tool in the reachable agent graph (handoffs included) routes
+through AgentCI's registry, so the policy, mocks, replay, and trace below work
+against a `refund_order` you never had to change. The SDK itself is untouched:
+`Runner.run` still performs the loop, just on a harness-owned event loop, and the
+agent graph is cloned per run so the original tool objects stay pristine.
+
+The interesting part is what an unmodified agent buys you: a **recorded
+behavioral ground truth**. First, capture the current agent doing the right thing
+(one refund):
+
+```text
+$ agentci record --name refund
+recorded agentci_test_... -> .agentci/traces/refund.jsonl
+```
+
+And confirm an unchanged agent replays clean:
+
+```text
+$ agentci replay --root . .agentci/traces/refund.jsonl
+recorded scenario replayed clean; trace matches the recording
+```
+
+Now an engineer "fixes" order handling — perhaps as genuinely subtle as a batch
+refund loop — and the agent refunds the order twice. Run the same recording again:
+
+```text
+$ agentci replay .agentci/traces/refund.jsonl
+FAIL: replay diverged — the run tried refund_order a second time, which the
+recording never answered
+```
+
+Every tool call the recording never saw is refused and marked `replay: divergent`,
+so a replay is never silently "fine". Then look at what actually changed between
+the recording and the replay:
+
+```text
+$ agentci diff .agentci/traces/refund.jsonl .agentci/traces/refund-replay.jsonl
+trace diff: .agentci/traces/refund.jsonl -> .agentci/traces/refund-replay.jsonl
+
+  tool calls  1 -> 2  (+1)
+  ...
+  added:
+    refund_order  (order_id='ORD-7781', amount=49.99)
+
+BEHAVIOR: CHANGED (1 addition(s))
+```
+
+A regression refund is now a name in a diff, not a spot check. Point the release
+job at the same suite and the change cannot ship:
+
+```text
+RELEASE GATE: BLOCKED
+  - the run failed: 1 failing test(s); regressed against the recorded baseline
+```
+
+That is the full loop for an agent your team already built: **record the behavior
+that must never break, break the agent, watch the gate name the reason.**
+
 ## The release gate
 
 `agentci gate` is how a change gets a *verdict* instead of a checkmark. It is
@@ -192,6 +282,9 @@ agentci config
 | `agentci diff <a.jsonl> <b.jsonl>` | Compare two trace artifacts; exit 0 unchanged, 1 changed |
 | `agentci version` | Print the version |
 
+The openai-agents adapter lives in `agentci.integrations.openai_agents`
+(`pip install "agentci-py[openai-agents]"`).
+
 Selection: `--tag` / `-k` (repeatable), `--test-id` (repeatable), `--name`
 (substring), `--repeat`, `--fail-on-warn`, `--no-traces`, `--json`, `--output FILE`.
 Change-aware: `--changed` (run) and `--base <ref>` (run and gate) choose what a diff
@@ -281,6 +374,13 @@ exports a scenario as a standalone artifact, `agentci replay` re-executes it wit
 every tool call answered from the recording (a call the recording never saw is
 refused, recorded as `replay: divergent`, and fails the run), and `agentci diff`
 tells you what behavior changed between two artifacts.
+
+The `openai-agents` integration lands the same guarantees on an existing
+`agents.Agent` without a rewrite: `AgentCI(root_agent)` re-roots the reachable
+graph (handoffs included) so every function tool routes through the registry, and
+the SDK runs on a harness-owned event loop with tracing disabled. Model calls are
+recorded as `model_call` trace events alongside the tool events. Install it with
+`agentci-py[openai-agents]`.
 
 Not yet wired up:
 
